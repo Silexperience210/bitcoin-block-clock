@@ -694,6 +694,17 @@ def page_doom():
                     g.fillRect(sx - eyesz, cyE + sh // 8, eyesz * 2, eyesz, C_WHITE)
         if perp < 3.5:   # nom au-dessus
             g.text(sx - len(DM_NAME[typ]) * 3, cyE - sh // 2 - 9, DM_NAME[typ], 1, C_GREY)
+    # liasse de billets de Lagarde (projectile vert)
+    g.fillCircle(300, 170, 9, C_GREEN_D)
+    g.fillRect(300 - 7, 169, 14, 3, C_WHITE)
+    # explosion de billets verts (kill)
+    import random as _r
+    _r.seed(7)
+    for b in range(14):
+        bx = 240 + _r.randint(-90, 90)
+        by = 210 + _r.randint(-70, 40)
+        g.fillRect(bx, by, 5, 3, C_GREEN_D if b % 3 == 0 else C_GREEN)
+        g.fillRect(bx + 2, by, 1, 3, C_WHITE)
     # joysticks (repères fixes)
     g.drawCircle(70, 252, 34, C_DGREY)
     g.drawCircle(288, 252, 34, C_DGREY)

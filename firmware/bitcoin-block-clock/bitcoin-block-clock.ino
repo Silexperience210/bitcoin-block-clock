@@ -454,6 +454,9 @@ void sndTask(void *param) {
       if (n.kind == SND_EVENT && (nightMode || sleeping)) continue;  // silencieux la nuit / en veille
       synthBell((float)n.freq, n.durMs / 1000.0f, n.vol / 100.0f);
     }
+    static unsigned long tWm2 = 0;
+    if (millis() - tWm2 > 10000) { tWm2 = millis();
+      Serial.printf("[WM] snd free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
   }
 }
 
@@ -951,6 +954,9 @@ void netTask(void *param) {
 
     if (worked) needRedraw = true;
     vTaskDelay(pdMS_TO_TICKS(200));
+    static unsigned long tWm3 = 0;
+    if (worked && millis() - tWm3 > 10000) { tWm3 = millis();
+      Serial.printf("[WM] net free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
   }
 }
 
@@ -2170,10 +2176,16 @@ const char* DM_TTS[3]   = {"Saylor", "Trump", "Lagarde"};
 #define DOOM_VOICE_TAUNTS 1                                  // taunt vocal au kill (TTS)
 char dmPopup[40] = ""; unsigned long dmPopupMs = 0;          // popup kill / vague
 
-// projectiles de Lagarde ("hausses des taux" esquivables)
+// projectiles de Lagarde ("hausses des taux" = liasses de billets esquivables)
 struct DmShot { float x, y, vx, vy; bool on; unsigned long t0; };
 #define DM_NSHOTS 3
 DmShot dmShot[DM_NSHOTS];
+
+// explosion de billets verts à la mort d'un ennemi
+#define DM_NBILLS 14
+struct DmBill { float x, y, vx, vy; };
+DmBill dmBills[DM_NBILLS];
+unsigned long dmBillsT0 = 0;
 
 // affiches Bitcoin sur les murs (billboards z-bufferés)
 struct DmPoster { float x, y; const char *txt; };
@@ -2321,6 +2333,16 @@ void drawPageDoom() {
           dmE[i].st = 2; dmE[i].t0 = now; doomScore += DM_SCORE[dmE[i].type];
           snprintf(dmPopup, sizeof(dmPopup), "%s DOWN +%d", DM_NAME[dmE[i].type], DM_SCORE[dmE[i].type]);
           dmPopupMs = now;
+          // explosion de billets verts depuis la position écran de l'ennemi
+          {
+            int ybK = DOOM_TOP + (rh + (int)(rh / max(0.1f, perp))) / 2;
+            dmBillsT0 = now;
+            for (int b = 0; b < DM_NBILLS; b++) {
+              dmBills[b].x = (float)sx; dmBills[b].y = (float)(ybK - sh / 2);
+              dmBills[b].vx = random(-250, 251) / 100.0f;   // px/frame
+              dmBills[b].vy = random(-450, 51) / 100.0f;    // jaillit vers le haut
+            }
+          }
           if (dmE[i].type == ET_SAYLOR) { beep(300, 60, 35); beep(450, 60, 35); beep(600, 80, 35); }
           else if (dmE[i].type == ET_TRUMP) { beep(600, 40, 35); beep(350, 70, 35); }
           else { beep(700, 50, 35); beep(900, 70, 35); }
@@ -2515,7 +2537,21 @@ void drawPageDoom() {
       if (perp >= zbuf[x / DOOM_COLW]) continue;
       float u = (float)(x - sx) / rw;
       int hh = (int)(sh / 2 * sqrtf(max(0.0f, 1.0f - u * u)));
-      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, C_YELLOW);
+      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, C_GREEN_D);
+    }
+    // bandeau blanc de la liasse de billets (si le centre est visible)
+    if (perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)])
+      gfx->drawFastHLine(sx - rw / 2, cyE, rw, C_WHITE);
+  }
+
+  // ---- explosion de billets verts à la mort d'un ennemi (0,8 s) ----
+  if (dmBillsT0 && now - dmBillsT0 < 800) {
+    for (int b = 0; b < DM_NBILLS; b++) {
+      DmBill &bl = dmBills[b];
+      bl.x += bl.vx; bl.y += bl.vy; bl.vy += 0.30f;          // gravité écran
+      if (bl.y > DOOM_BOT + 8) continue;
+      gfx->fillRect((int)bl.x, (int)bl.y, 5, 3, (b % 3 == 0) ? C_GREEN_D : C_GREEN);
+      gfx->fillRect((int)bl.x + 2, (int)bl.y, 1, 3, C_WHITE);  // bandeau de la liasse
     }
   }
 
@@ -2698,6 +2734,10 @@ void loop() {
   server.handleClient();
   unsigned long now = millis();
   updateBattery();          // batterie : lecture cache + détection de charge (5 s)
+  // debug stack watermark (temporaire — diagnostic crash DOOM)
+  static unsigned long tWm = 0;
+  if (millis() - tWm > 5000) { tWm = millis();
+    Serial.printf("[WM] loop free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
   // pendant la charge : forcer le redraw pour animer le clignotement de la jauge
   static unsigned long tBatBlink = 0;
   if (batCharging && !sleeping && millis() - tBatBlink > 800) {
