@@ -33,7 +33,7 @@ watchdog, NTP. **Zero credentials in the code.**
 |---|---|
 | 💹 **PRICE** | EUR/USD/CHF live price with smooth animated digits, chart with 4 timeframes & touch cursor, price alerts |
 | ⛓️ **ON-CHAIN** | Block height + timer, fees ×4, difficulty, halving countdown, **Whale Watch**, bell *DONG* on every new block |
-| 🗣️ **VOICE** | SAM speech synthesizer (on-device, no cloud): announces *"New block"* + the mining pool — test it on `http://blockclock.local/say?t=Hello` |
+| 🗣️ **VOICE** | Natural voice (Google Translate TTS, MP3 decoded on-device via ESP8266Audio) announcing *"New block"* + the mining pool — SAM robotic voice as offline fallback. Test: `http://blockclock.local/say?t=Hello` |
 | 🧊 **CUBE** | Mempool as particle art — a chain drags each mined block away |
 | 🏁 **POOLS WAR** | Animated race of mining pools over the week (mempool.space) |
 | ⚡ **LIGHTNING** | Network capacity, channels, nodes, average fees |
@@ -98,7 +98,8 @@ watertight/manifold meshes — zero repair in the slicer.
 ## 🚀 Build & flash
 
 Requires ESP32 Arduino core **2.0.14**, `GFX Library for Arduino`
-**v1.4.9 exactly**, ArduinoJson v7.
+**v1.4.9 exactly**, ArduinoJson v7, **ESP8266Audio v1.9.7** (not 2.x — it
+needs ESP-IDF 5.x).
 
 ```bash
 cd firmware/bitcoin-block-clock

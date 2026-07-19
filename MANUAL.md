@@ -132,10 +132,11 @@ with **zero repair**.
   then).
 - **Battery gauge:** the header battery icon shows the % inside it and
   **blinks while charging**.
-- **Voice (SAM):** the clock speaks English on new blocks
-  (*"New block, \<pool\>"*). Try it: `http://blockclock.local/say?t=Hello`.
-  Tune the voice with `SAM_SPEED`/`SAM_PITCH`/`SAM_MOUTH`/`SAM_THROAT` in the
-  sketch, or revert to the plain bell with `SPEECH_BLOCKS 0`.
+- **Voice:** natural voice via **Google Translate TTS** (MP3 fetched and
+  decoded on-device, no API key) announcing *"New block, \<pool\>"*. Falls
+  back to the offline SAM robotic voice if the network fetch fails. Try it:
+  `http://blockclock.local/say?t=Hello`. Set `TTS_LANG "fr"` for French
+  announcements (*"Nouveau bloc, \<pool\>"*), or `TTS_GOOGLE 0` for SAM-only.
 - **Sound — volume & mute:** tap the **speaker icon in the header** (left of
   the WiFi dots) to cycle **100 % → 60 % → 30 % → mute**, saved in flash
   (applies to bells *and* the SAM voice). Night mode (23:00–07:00) silences

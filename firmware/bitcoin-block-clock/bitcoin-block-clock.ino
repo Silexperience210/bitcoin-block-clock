@@ -49,6 +49,40 @@ extern "C" {
 }
 int debug = 0;   // requis par la lib SAM (sorties debug désactivées)
 
+// ---------- TTS Google Translate (voix naturelle en ligne) + MP3 ESP8266Audio ----------
+#include "AudioGeneratorMP3.h"
+#include "AudioFileSource.h"
+#include "AudioOutput.h"
+
+// source audio depuis un buffer RAM/PSRAM (le MP3 du TTS)
+class AudioFileSourceMem : public AudioFileSource {
+public:
+  AudioFileSourceMem(const uint8_t *data, uint32_t len) : p(data), n(len) {}
+  bool open(const char*) override { pos = 0; return true; }
+  uint32_t read(void *data, uint32_t len) override {
+    if ((uint32_t)pos >= n) return 0;
+    if (len > n - pos) len = n - pos;
+    memcpy(data, p + pos, len); pos += len; return len;
+  }
+  bool seek(int32_t p2, int dir) override {
+    if (dir == SEEK_SET) pos = p2;
+    else if (dir == SEEK_CUR) pos += p2;
+    else pos = n - p2;
+    if (pos < 0) pos = 0;
+    if ((uint32_t)pos > n) pos = n;
+    return true;
+  }
+  bool close() override { return true; }
+  bool isOpen() override { return true; }
+  uint32_t getSize() override { return n; }
+  uint32_t getPos() override { return pos; }
+private:
+  const uint8_t *p; uint32_t n; int32_t pos = 0;
+};
+
+#define TTS_GOOGLE 1     // 1 = voix naturelle Google (réseau requis) ; 0 = SAM local
+#define TTS_LANG   "en"  // "fr" pour la voix française
+
 // ---------------- PINS ----------------
 #define PIN_BL      1
 #define TP_SDA      4
@@ -309,6 +343,97 @@ void speakSam(const char *textEn) {
   }
 }
 
+// ---------- sortie audio vers notre driver I2S existant ----------
+// Reçoit le PCM du décodeur MP3, ajuste l'horloge I2S au taux du MP3,
+// applique le volume, restaure 22050 Hz à la fin (pour la synthèse cloche).
+class AudioOutputI2SClock : public AudioOutput {
+public:
+  bool SetRate(int hz) override {
+    return i2s_set_clk(I2S_PORT, hz, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO) == ESP_OK;
+  }
+  bool SetBitsPerSample(int bps) override { return bps == 16; }
+  bool SetChannels(int ch) override { channels = ch; return ch >= 1 && ch <= 2; }
+  bool begin() override { pos = 0; return true; }
+  bool ConsumeSample(int16_t sample[2]) override {
+    int32_t l = sample[0] * sndVolPct / 100;
+    int32_t r = ((channels == 2) ? sample[1] : sample[0]) * sndVolPct / 100;
+    if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
+    if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+    buf[pos * 2] = (int16_t)l; buf[pos * 2 + 1] = (int16_t)r;
+    if (++pos >= CHUNK) flush();
+    return true;
+  }
+  void flush() override {
+    if (pos > 0) { size_t w; i2s_write(I2S_PORT, buf, pos * 2 * sizeof(int16_t), &w, portMAX_DELAY); pos = 0; }
+  }
+  bool stop() override {
+    flush();
+    i2s_set_clk(I2S_PORT, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+    return true;
+  }
+private:
+  static const int CHUNK = 512;
+  int16_t buf[CHUNK * 2];
+  int pos = 0, channels = 1;
+};
+
+// encode minimal pour une URL
+String urlEncode(const String &s) {
+  String out;
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += c;
+    else if (c == ' ') out += "%20";
+    else { char h[4]; snprintf(h, sizeof(h), "%%%02X", (uint8_t)c); out += h; }
+  }
+  return out;
+}
+
+// TTS Google Translate : fetch MP3 en PSRAM puis décodage (bloquant, sndTask)
+bool speakGoogle(const char *text, const char *lang) {
+  String url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=" +
+               String(lang) + "&q=" + urlEncode(text);
+  WiFiClientSecure client; client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(8000);
+  if (!http.begin(client, url)) return false;
+  int code = http.GET();
+  if (code != 200) { Serial.printf("[TTS] HTTP %d\n", code); http.end(); return false; }
+  // Google répond en chunked (pas de Content-Length) : on lit jusqu'à EOF
+  const int TTS_MAX = 65536;
+  uint8_t *mp3 = (uint8_t*)ps_malloc(TTS_MAX);
+  if (!mp3) { http.end(); return false; }
+  WiFiClient *st = http.getStreamPtr();
+  int got = 0;
+  unsigned long t0 = millis();
+  while (got < TTS_MAX && millis() - t0 < 10000) {
+    int r = st->read(mp3 + got, TTS_MAX - got);
+    if (r < 0) break;                    // fin du flux
+    if (r == 0 && !st->connected()) break;
+    got += r;
+  }
+  http.end();
+  if (got < 1000) { Serial.printf("[TTS] trop court %d\n", got); free(mp3); return false; }
+  Serial.printf("[TTS] \"%s\" -> mp3 %d bytes\n", text, got);
+  AudioFileSourceMem *src = new AudioFileSourceMem(mp3, got);
+  AudioGeneratorMP3 *dec = new AudioGeneratorMP3();
+  AudioOutputI2SClock *out = new AudioOutputI2SClock();
+  dec->begin(src, out);
+  while (dec->loop()) {}
+  dec->stop();
+  delete dec; delete src; delete out;
+  free(mp3);
+  return true;
+}
+
+// dispatcher vocal : Google en ligne, sinon SAM local en repli
+void speakAuto(const char *txt) {
+#if TTS_GOOGLE
+  if (speakGoogle(txt, TTS_LANG)) return;
+#endif
+  speakSam(txt);
+}
+
 // push non bloquant d'une phrase (queue pleine = phrase perdue, tant pis)
 void speak(const String &txt, uint8_t kind) {
   if (!sndTxtQ || sndVolPct == 0) return;              // muet : voix coupée
@@ -322,7 +447,7 @@ void sndTask(void *param) {
   for (;;) {
     // parole en priorité
     if (xQueueReceive(sndTxtQ, &t, 0) == pdTRUE) {
-      if (!(t.kind == SND_EVENT && (nightMode || sleeping))) speakSam(t.txt);
+      if (!(t.kind == SND_EVENT && (nightMode || sleeping))) speakAuto(t.txt);
       continue;
     }
     if (xQueueReceive(sndQ, &n, pdMS_TO_TICKS(120)) == pdTRUE) {
@@ -2319,7 +2444,7 @@ void setup() {
   // ---------- tâches FreeRTOS ----------
   sndQ = xQueueCreate(8, sizeof(SndNote));
   sndTxtQ = xQueueCreate(4, sizeof(SndTxt));
-  xTaskCreatePinnedToCore(sndTask, "snd", 4096, NULL, 2, NULL, 0);    // sons non bloquants
+  xTaskCreatePinnedToCore(sndTask, "snd", 20480, NULL, 2, NULL, 0);   // sons + TTS (TLS+MP3 = gros stack)
   xTaskCreatePinnedToCore(netTask, "net", 12288, NULL, 1, NULL, 0);   // tous les fetchs HTTP
 
   // boot non bloquant : tout fetcher en tâche de fond, UI immédiate
@@ -2473,9 +2598,10 @@ void loop() {
 #if SPEECH_BLOCKS
     // annonce vocale : "New block. <pool>." (filtrée la nuit / en veille)
     { char pool[32]; long btx; snapLastBlock(pool, sizeof(pool), &btx);
+      const char *lead = (String(TTS_LANG) == "fr") ? "Nouveau bloc. " : "New block. ";
       char phrase[96];
-      if (pool[0]) snprintf(phrase, sizeof(phrase), "New block. %s.", pool);
-      else strlcpy(phrase, "New block.", sizeof(phrase));
+      if (pool[0]) snprintf(phrase, sizeof(phrase), "%s%s.", lead, pool);
+      else strlcpy(phrase, lead, sizeof(phrase));
       speak(phrase, SND_EVENT); }
 #else
     playBellQ();
