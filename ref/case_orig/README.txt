@@ -1,0 +1,1 @@
+Standalone Case JC3248W535C by so99hero on Thingiverse: https://www.thingiverse.com/thing:7127557

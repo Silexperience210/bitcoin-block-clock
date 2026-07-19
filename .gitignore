@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+ref/case_orig.zip
+.DS_Store
+Thumbs.db
