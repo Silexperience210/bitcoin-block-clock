@@ -42,6 +42,13 @@
 #include "btc_logo.h"
 #include "smooth_font.h"
 
+// ---------- synthèse vocale SAM (Software Automatic Mouth, s-macke/SAM) ----------
+extern "C" {
+  #include "src/sam/sam.h"
+  #include "src/sam/reciter.h"
+}
+int debug = 0;   // requis par la lib SAM (sorties debug désactivées)
+
 // ---------------- PINS ----------------
 #define PIN_BL      1
 #define TP_SDA      4
@@ -258,10 +265,59 @@ void synthBell(float freq, float durSec, float vol) {
   }
 }
 
+// ---------- parole SAM (voix anglaise, réglage "doux") ----------
+#define SAM_SPEED  60    // 72 = défaut (plus petit = plus lent)
+#define SAM_PITCH  55    // 64 = défaut (plus petit = plus grave/doux)
+#define SAM_MOUTH  128
+#define SAM_THROAT 128
+#define SAM_GAIN   2     // gain appliqué aux samples 8 bits de SAM
+#define SPEECH_BLOCKS 1  // 1 = annonce vocale des blocs ; 0 = cloche seule
+
+struct SndTxt { char txt[96]; uint8_t kind; };
+QueueHandle_t sndTxtQ = NULL;
+
+// rend + joue une phrase anglaise via SAM (bloquant — tourne dans sndTask)
+void speakSam(const char *textEn) {
+  char tmp[256];
+  strlcpy(tmp, textEn, sizeof(tmp));
+  if (!TextToPhonemes((unsigned char*)tmp)) return;   // anglais -> phonèmes (en place)
+  SetInput(tmp);
+  SetSpeed(SAM_SPEED); SetPitch(SAM_PITCH);
+  SetMouth(SAM_MOUTH); SetThroat(SAM_THROAT);
+  if (!SAMMain()) return;
+  int n = GetBufferLength();
+  char *buf = GetBuffer();
+  Serial.printf("[SAM] \"%s\" -> %d samples\n", textEn, n);
+  const int chunk = 512;
+  int16_t out[chunk * 2];
+  for (int pos = 0; pos < n; ) {
+    int k = 0;
+    for (; k < chunk && pos < n; k++, pos++) {
+      int32_t s = (int32_t)buf[pos] * 256 * SAM_GAIN;   // 8 bits signé -> 16 bits
+      if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
+      out[k * 2] = (int16_t)s; out[k * 2 + 1] = (int16_t)s;
+    }
+    size_t w; i2s_write(I2S_PORT, out, k * 2 * sizeof(int16_t), &w, portMAX_DELAY);
+  }
+}
+
+// push non bloquant d'une phrase (queue pleine = phrase perdue, tant pis)
+void speak(const String &txt, uint8_t kind) {
+  if (!sndTxtQ) return;
+  SndTxt t; t.kind = kind;
+  strlcpy(t.txt, txt.c_str(), sizeof(t.txt));
+  xQueueSend(sndTxtQ, &t, 0);
+}
+
 void sndTask(void *param) {
-  SndNote n;
+  SndNote n; SndTxt t;
   for (;;) {
-    if (xQueueReceive(sndQ, &n, portMAX_DELAY) == pdTRUE) {
+    // parole en priorité
+    if (xQueueReceive(sndTxtQ, &t, 0) == pdTRUE) {
+      if (!(t.kind == SND_EVENT && (nightMode || sleeping))) speakSam(t.txt);
+      continue;
+    }
+    if (xQueueReceive(sndQ, &n, pdMS_TO_TICKS(120)) == pdTRUE) {
       if (n.kind == SND_EVENT && (nightMode || sleeping)) continue;  // silencieux la nuit / en veille
       synthBell((float)n.freq, n.durMs / 1000.0f, n.vol / 100.0f);
     }
@@ -2210,6 +2266,12 @@ void setup() {
     s += "<p style='margin-top:20px'><a style='color:#F7931A' href='/reset'>Oublier le WiFi</a></p></body>";
     server.send(200, "text/html", s);
   });
+  // test vocal : /say?t=Hello world (anglais, via SAM)
+  server.on("/say", HTTP_GET, []() {
+    if (!server.hasArg("t")) { server.send(400, "text/plain", "missing t"); return; }
+    speak(server.arg("t"), SND_UI);
+    server.send(200, "text/plain", "ok");
+  });
   server.on("/alerts", HTTP_POST, []() {
     alertHi = server.arg("hi").toFloat();
     alertLo = server.arg("lo").toFloat();
@@ -2230,6 +2292,7 @@ void setup() {
 
   // ---------- tâches FreeRTOS ----------
   sndQ = xQueueCreate(8, sizeof(SndNote));
+  sndTxtQ = xQueueCreate(4, sizeof(SndTxt));
   xTaskCreatePinnedToCore(sndTask, "snd", 4096, NULL, 2, NULL, 0);    // sons non bloquants
   xTaskCreatePinnedToCore(netTask, "net", 12288, NULL, 1, NULL, 0);   // tous les fetchs HTTP
 
@@ -2374,7 +2437,16 @@ void loop() {
       if (page == PG_CUBE) cubeBlockSeq();           // la chaîne emporte le cube
       else { animNewBlock = true; animStart = now; } // flash classique ailleurs
     }
+#if SPEECH_BLOCKS
+    // annonce vocale : "New block. <pool>." (filtrée la nuit / en veille)
+    { char pool[32]; long btx; snapLastBlock(pool, sizeof(pool), &btx);
+      char phrase[96];
+      if (pool[0]) snprintf(phrase, sizeof(phrase), "New block. %s.", pool);
+      else strlcpy(phrase, "New block.", sizeof(phrase));
+      speak(phrase, SND_EVENT); }
+#else
     playBellQ();
+#endif
   }
   if (evWhale) { evWhale = false; playWhale(); }
   if (evAnomaly) { evAnomaly = false; playAlarm(); }   // z-score anormal détecté

@@ -33,6 +33,7 @@ watchdog, NTP. **Zero credentials in the code.**
 |---|---|
 | 💹 **PRICE** | EUR/USD/CHF live price with smooth animated digits, chart with 4 timeframes & touch cursor, price alerts |
 | ⛓️ **ON-CHAIN** | Block height + timer, fees ×4, difficulty, halving countdown, **Whale Watch**, bell *DONG* on every new block |
+| 🗣️ **VOICE** | SAM speech synthesizer (on-device, no cloud): announces *"New block"* + the mining pool — test it on `http://blockclock.local/say?t=Hello` |
 | 🧊 **CUBE** | Mempool as particle art — a chain drags each mined block away |
 | 🏁 **POOLS WAR** | Animated race of mining pools over the week (mempool.space) |
 | ⚡ **LIGHTNING** | Network capacity, channels, nodes, average fees |

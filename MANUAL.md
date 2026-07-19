@@ -127,7 +127,16 @@ with **zero repair**.
   battery automatically when present.
 - **Battery switch:** the board's battery switch (rear side) becomes
   inaccessible once assembled — leave it **ON**, or open the shell (4× M3) to
-  reach it.
+  reach it. **Note:** a short press on this button is also required to *start*
+  the board on battery (the power-management IC keeps the 5 V output off until
+  then).
+- **Battery gauge:** the header battery icon shows the % inside it and
+  **blinks while charging**.
+- **Voice (SAM):** the clock speaks English on new blocks
+  (*"New block, \<pool\>"*). Try it: `http://blockclock.local/say?t=Hello`.
+  Tune the voice with `SAM_SPEED`/`SAM_PITCH`/`SAM_MOUTH`/`SAM_THROAT` in the
+  sketch, or revert to the plain bell with `SPEECH_BLOCKS 0`.
+- **Sound:** night mode (23:00–07:00) silences event sounds; UI beeps remain.
 - **Boot/Reset buttons:** also inside the case — open the shell to reprogram
   the board, or flash it before final assembly.
 - The case leans back 12° with a full-length flat base: stable on any desk.
