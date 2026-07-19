@@ -275,7 +275,7 @@ void synthBell(float freq, float durSec, float vol) {
 #define SAM_PITCH  55    // 64 = défaut (plus petit = plus grave/doux)
 #define SAM_MOUTH  128
 #define SAM_THROAT 128
-#define SAM_GAIN   2     // gain appliqué aux samples 8 bits de SAM
+#define SAM_GAIN   1     // gain appliqué aux samples 8 bits de SAM
 #define SPEECH_BLOCKS 1  // 1 = annonce vocale des blocs ; 0 = cloche seule
 
 struct SndTxt { char txt[96]; uint8_t kind; };
@@ -298,7 +298,8 @@ void speakSam(const char *textEn) {
   for (int pos = 0; pos < n; ) {
     int k = 0;
     for (; k < chunk && pos < n; k++, pos++) {
-      int32_t s = (int32_t)buf[pos] * 256 * SAM_GAIN * sndVolPct / 100;
+      // samples SAM = 8 bits NON SIGNÉS (0..240, silence ~128) -> 16 bits signé
+      int32_t s = ((int32_t)(uint8_t)buf[pos] - 128) * 256 * SAM_GAIN * sndVolPct / 100;
       if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
       out[k * 2] = (int16_t)s; out[k * 2 + 1] = (int16_t)s;
     }
