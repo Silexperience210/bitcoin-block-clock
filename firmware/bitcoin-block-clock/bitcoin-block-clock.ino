@@ -225,6 +225,11 @@ enum { SND_UI = 0, SND_EVENT = 1 };
 struct SndNote { uint16_t freq; uint16_t durMs; uint8_t vol; uint8_t kind; };
 QueueHandle_t sndQ = NULL;
 
+// ---------- gestion du volume (icône HP header : tap = cycle) ----------
+// 100 -> 60 -> 30 -> 0 (muet) -> 100 ... persisté en NVS ("sndvol").
+// S'applique aux cloches ET à la voix SAM.
+uint8_t sndVolPct = 100;
+
 void audioInit() {
   i2s_config_t cfg = {};
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
@@ -293,7 +298,7 @@ void speakSam(const char *textEn) {
   for (int pos = 0; pos < n; ) {
     int k = 0;
     for (; k < chunk && pos < n; k++, pos++) {
-      int32_t s = (int32_t)buf[pos] * 256 * SAM_GAIN;   // 8 bits signé -> 16 bits
+      int32_t s = (int32_t)buf[pos] * 256 * SAM_GAIN * sndVolPct / 100;
       if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
       out[k * 2] = (int16_t)s; out[k * 2 + 1] = (int16_t)s;
     }
@@ -303,7 +308,7 @@ void speakSam(const char *textEn) {
 
 // push non bloquant d'une phrase (queue pleine = phrase perdue, tant pis)
 void speak(const String &txt, uint8_t kind) {
-  if (!sndTxtQ) return;
+  if (!sndTxtQ || sndVolPct == 0) return;              // muet : voix coupée
   SndTxt t; t.kind = kind;
   strlcpy(t.txt, txt.c_str(), sizeof(t.txt));
   xQueueSend(sndTxtQ, &t, 0);
@@ -326,8 +331,8 @@ void sndTask(void *param) {
 
 // push non bloquant (queue pleine = note perdue, tant pis)
 void playNote(uint16_t freq, uint16_t durMs, uint8_t vol, uint8_t kind) {
-  if (!sndQ) return;
-  SndNote n = {freq, durMs, vol, kind};
+  if (!sndQ || sndVolPct == 0) return;                 // muet : tout coupé
+  SndNote n = {freq, durMs, (uint8_t)(vol * sndVolPct / 100), kind};
   xQueueSend(sndQ, &n, 0);
 }
 
@@ -370,6 +375,7 @@ void loadConfig() {
   cfg_nodeip = prefs.getString("nodeip", "192.168.1.110");
   alertHi    = prefs.getFloat("alertHi", 0);
   alertLo    = prefs.getFloat("alertLo", 0);
+  sndVolPct  = prefs.getUChar("sndvol", 100);
   feeSamples = prefs.getLong("feesmp", 0);
   if (prefs.getBytes("feebkt", feeBkt, sizeof(feeBkt)) != sizeof(feeBkt))
     memset(feeBkt, 0, sizeof(feeBkt));
@@ -391,6 +397,7 @@ void saveConfig() {
   prefs.putString("nodeip", cfg_nodeip);
   prefs.putFloat("alertHi", alertHi);
   prefs.putFloat("alertLo", alertLo);
+  prefs.putUChar("sndvol", sndVolPct);
   prefs.end();
 }
 
@@ -943,6 +950,22 @@ void drawHeader() {
   // wifi : dot 1 = état (vert connecté / rouge déconnecté),
   //        dots 2-3 = force du signal (RSSI)
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  // gestion du son : icône HP à gauche des dots WiFi (tap = cycle volume)
+  gfx->fillRect(346, 10, 4, 6, C_GREY);                       // corps du HP
+  gfx->fillTriangle(350, 7, 350, 19, 356, 13, C_GREY);        // pavillon
+  if (sndVolPct == 0) {                                       // muet : croix rouge
+    gfx->drawLine(345, 6, 367, 20, C_RED);
+    gfx->drawLine(367, 6, 345, 20, C_RED);
+  } else {                                                    // ondes selon le niveau
+    for (float a = -1.0f; a <= 1.0f; a += 0.12f) {
+      if (sndVolPct >= 30)
+        gfx->drawPixel(358 + (int)(cosf(a) * 4), 13 + (int)(sinf(a) * 4), C_GREY);
+      if (sndVolPct >= 60)
+        gfx->drawPixel(358 + (int)(cosf(a) * 7), 13 + (int)(sinf(a) * 7), C_GREY);
+      if (sndVolPct >= 100)
+        gfx->drawPixel(358 + (int)(cosf(a) * 10), 13 + (int)(sinf(a) * 10), C_GREY);
+    }
+  }
   gfx->fillCircle(384, 13, 3, wifiOk ? C_GREEN : C_RED);
   long rssi = wifiOk ? WiFi.RSSI() : -127;
   gfx->fillCircle(393, 13, 3, wifiOk && rssi > -70 ? C_GREEN : C_DGREY);
@@ -2366,8 +2389,15 @@ void loop() {
     } else if (!sleeping && dt <= 1200) {
       int dx = (int)lastX - (int)downX;
       int dy = (int)lastY - (int)downY;
+      // icône HP (header) : tap = cycle volume 100 -> 60 -> 30 -> muet
+      if (!touchMoved && downY < 26 && downX >= 340 && downX <= 372) {
+        sndVolPct = (sndVolPct > 60) ? 60 : (sndVolPct > 30) ? 30 : (sndVolPct > 0) ? 0 : 100;
+        saveConfig();
+        needRedraw = true; lastActionMs = now;
+        if (sndVolPct > 0) beep(1200, 60, 40);   // feedback au nouveau niveau
+      }
       // barre d'onglets : tap sur une icône = accès direct à la page
-      if (!touchMoved && downY >= NAV_Y) {
+      else if (!touchMoved && downY >= NAV_Y) {
         int tab = constrain((int)downX / TAB_W, 0, (int)PG_COUNT - 1);
         if (tab != page) {
           page = tab; lastActionMs = now;

@@ -136,7 +136,10 @@ with **zero repair**.
   (*"New block, \<pool\>"*). Try it: `http://blockclock.local/say?t=Hello`.
   Tune the voice with `SAM_SPEED`/`SAM_PITCH`/`SAM_MOUTH`/`SAM_THROAT` in the
   sketch, or revert to the plain bell with `SPEECH_BLOCKS 0`.
-- **Sound:** night mode (23:00–07:00) silences event sounds; UI beeps remain.
+- **Sound — volume & mute:** tap the **speaker icon in the header** (left of
+  the WiFi dots) to cycle **100 % → 60 % → 30 % → mute**, saved in flash
+  (applies to bells *and* the SAM voice). Night mode (23:00–07:00) silences
+  event sounds; UI beeps remain.
 - **Boot/Reset buttons:** also inside the case — open the shell to reprogram
   the board, or flash it before final assembly.
 - The case leans back 12° with a full-length flat base: stable on any desk.
