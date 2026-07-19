@@ -891,11 +891,14 @@ void drawHeader() {
   long rssi = wifiOk ? WiFi.RSSI() : -127;
   gfx->fillCircle(393, 13, 3, wifiOk && rssi > -70 ? C_GREEN : C_DGREY);
   gfx->fillCircle(402, 13, 3, wifiOk && rssi > -55 ? C_GREEN : C_DGREY);
-  // batterie : icône avec le % intégré (lecture GPIO5, diviseur R26/R27)
+  // batterie : icône avec le % intégré (lecture GPIO5, diviseur 68K/100K) ;
+  // la jauge CLIGNOTE pendant la charge (batCharging, voir updateBattery)
   int bp = batteryPct();
   gfx->drawRect(444, 7, 28, 12, C_GREY);
   gfx->fillRect(472, 10, 3, 6, C_GREY);
-  gfx->fillRect(446, 9, (int)(24 * bp / 100.0f), 8, bp > 25 ? C_GREEN : C_RED);
+  bool batBlinkOn = !batCharging || ((millis() / 800) % 2 == 0);
+  if (batBlinkOn)
+    gfx->fillRect(446, 9, (int)(24 * bp / 100.0f), 8, bp > 25 ? C_GREEN : C_RED);
   gfx->setTextSize(1); gfx->setTextColor(C_WHITE);
   char bps[8];
   if (batPctNow >= 0) snprintf(bps, sizeof(bps), "%d%%", bp);
@@ -2245,6 +2248,12 @@ void loop() {
   server.handleClient();
   unsigned long now = millis();
   updateBattery();          // batterie : lecture cache + détection de charge (5 s)
+  // pendant la charge : forcer le redraw pour animer le clignotement de la jauge
+  static unsigned long tBatBlink = 0;
+  if (batCharging && !sleeping && millis() - tBatBlink > 800) {
+    tBatBlink = millis();
+    needRedraw = true;
+  }
 
   // ---------- mode nuit + tick minute (horloge du header) ----------
   struct tm t;
