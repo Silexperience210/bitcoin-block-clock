@@ -969,7 +969,7 @@ void drawArrow(int x, int y, bool up, uint16_t color) {
 // Pas de senseur VBUS sur la carte : la charge USB est détectée par la TENSION
 // (VBAT >= 4.25 V => l'USB force, ou hausse nette sur ~90 s => charge en cours).
 #define BAT_DIV    1.68f   // ratio du diviseur (68K/100K)
-#define BAT_OFFSET 0.0f    // calibration fine éventuelle (+/- V, ex. 0.127)
+#define BAT_OFFSET 0.13f   // calibration (ADC ESP32 ±3-8 % ; yoRadio mesure +0.127 V sur ces cartes)
 #define DEBUG_BAT 1        // 1 = log série [BAT] toutes les 5 s (0 pour couper)
 
 float vbatNow = 0.0f;
@@ -2171,21 +2171,40 @@ void drawPageDoom() {
   doomLastMs = now;
   int rh = DOOM_BOT - DOOM_TOP;
 
-  // ---- contrôle : drag = bouger (hors ✕ / FIRE), FIRE = tir ----
-  static int pTX = -1, pTY = -1;
+  // ---- contrôle : deux joysticks façon FPS mobile ----
+  // zone GAUCHE (x < 240) : joystick déplacement — vertical = avant/arrière,
+  //                         horizontal = STRAFE gauche/droite
+  // zone DROITE (x >= 240) : joystick regard — horizontal = tourner
+  // (FIRE et ✕ conservés ; la zone est verrouillée à la pose du doigt)
+  static int pTX = -1, pTY = -1, pZone = 0;
+  static int joyBX = 0, joyBY = 0, joyKX = 0, joyKY = 0;   // base + knob actif
   static bool fireHeld = false;
   bool onExit = (gTX >= GAME_EX && gTX <= GAME_EX + GAME_EW && gTY >= GAME_EY && gTY <= GAME_EY + GAME_EH);
   bool onFire = (gTX >= FIRE_X && gTX <= FIRE_X + FIRE_W && gTY >= FIRE_Y && gTY <= FIRE_Y + FIRE_H);
   if (gTouch && !onExit && !onFire) {
-    if (pTX >= 0) {
-      dmA += ((int)gTX - pTX) * 0.0042f;
-      float mv = (pTY - (int)gTY) * 0.0038f;
-      float nx = dmX + cosf(dmA) * mv, ny = dmY + sinf(dmA) * mv;
+    if (pTX < 0) {   // pose du doigt : verrouille la zone et la base du joystick
+      pTX = gTX; pTY = gTY;
+      pZone = (gTX < SCR_W / 2) ? 1 : 2;
+      joyBX = gTX; joyBY = gTY;
+    }
+    if (pZone == 1) {
+      // joystick déplacement : vitesse ∝ déport depuis la base, chaque frame
+      float fwd = (joyBY - (int)gTY) * 1.5f / 48.0f * dt;    // max ~1.5 cell/s
+      float lat = ((int)gTX - joyBX) * 1.5f / 48.0f * dt;    // strafe (perpendiculaire)
+      if (fwd > 0.2f) fwd = 0.2f; if (fwd < -0.2f) fwd = -0.2f;
+      if (lat > 0.2f) lat = 0.2f; if (lat < -0.2f) lat = -0.2f;
+      float nx = dmX + cosf(dmA) * fwd - sinf(dmA) * lat;
+      float ny = dmY + sinf(dmA) * fwd + cosf(dmA) * lat;
       if (!dmMap[(int)dmY][(int)nx]) dmX = nx;
       if (!dmMap[(int)ny][(int)dmX]) dmY = ny;
+      joyKX = gTX; joyKY = gTY;
+    } else {
+      // joystick regard : vitesse de rotation ∝ déport horizontal
+      dmA += ((int)gTX - joyBX) * 2.5f / 48.0f * dt;         // max ~2.5 rad/s
+      joyKX = gTX; joyKY = gTY;
     }
     pTX = gTX; pTY = gTY;
-  } else pTX = pTY = -1;
+  } else { pTX = pTY = -1; pZone = 0; }
 
   if (gTouch && onFire && !fireHeld) {   // TIR (hitscan)
     fireHeld = true; doomShotMs = now;
@@ -2297,6 +2316,18 @@ void drawPageDoom() {
       gfx->fillRect(sx - sh / 8, cyE - sh / 6, es, es, C_WHITE);
       gfx->fillRect(sx + sh / 8 - es, cyE - sh / 6, es, es, C_WHITE);
     }
+  }
+
+  // ---- joysticks : repères fixes + base/knob du doigt actif ----
+  gfx->drawCircle(70, 252, 34, C_DGREY);                     // repère joystick gauche
+  gfx->drawCircle(288, 252, 34, C_DGREY);                    // repère joystick regard
+  if (pZone != 0) {
+    gfx->drawCircle(joyBX, joyBY, 34, C_GREY);               // base flottante
+    int kx = joyKX, ky = joyKY;                              // knob clampé à 34 px
+    int ddx = joyKX - joyBX, ddy = joyKY - joyBY;
+    float dd = hypotf((float)ddx, (float)ddy);
+    if (dd > 34) { kx = joyBX + (int)(ddx * 34 / dd); ky = joyBY + (int)(ddy * 34 / dd); }
+    gfx->fillCircle(kx, ky, 13, C_ORANGE);
   }
 
   // ---- arme + muzzle flash + viseur ----

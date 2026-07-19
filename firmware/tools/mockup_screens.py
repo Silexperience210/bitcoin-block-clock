@@ -651,6 +651,9 @@ def page_doom():
             eyesz = max(2, sh // 20)
             g.fillRect(sx - sh // 8, cyE - sh // 6, eyesz, eyesz, C_WHITE)
             g.fillRect(sx + sh // 8 - eyesz, cyE - sh // 6, eyesz, eyesz, C_WHITE)
+    # joysticks (repères fixes)
+    g.drawCircle(70, 252, 34, C_DGREY)
+    g.drawCircle(288, 252, 34, C_DGREY)
     # arme + viseur
     g.fillRect(SCR_W // 2 - 12, DOOM_BOT - 44, 24, 44, C_DGREY)
     g.fillRect(SCR_W // 2 - 5, DOOM_BOT - 58, 10, 20, C_GREY)
