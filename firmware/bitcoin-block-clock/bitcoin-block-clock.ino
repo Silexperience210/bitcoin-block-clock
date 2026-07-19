@@ -771,10 +771,15 @@ void drawArrow(int x, int y, bool up, uint16_t color) {
 }
 
 // ---------- batterie : lecture cache + détection de charge ----------
-// Le diviseur R26/R27 (33K/100K) donne IO5 = VBAT x 0.752 -> VBAT = VIO5 x 1.33.
+// Mesure sur GPIO5 (ADC1_CH4). ATTENTION : le diviseur RÉEL des cartes
+// produites est R1=68K / R2=100K -> V_IO5 = VBAT x 100/168 -> VBAT = VIO5 x 1.68
+// (le schéma V1.0 indique 33K/100K = x1.33 : FAUX sur les cartes réelles,
+//  ratio 68K/100K confirmé par le firmware yoRadio JC3248W535C).
 // Pas de senseur VBUS sur la carte : la charge USB est détectée par la TENSION
 // (VBAT >= 4.25 V => l'USB force, ou hausse nette sur ~90 s => charge en cours).
-#define DEBUG_BAT 1   // 1 = log série [BAT] toutes les 5 s (0 pour couper)
+#define BAT_DIV    1.68f   // ratio du diviseur (68K/100K)
+#define BAT_OFFSET 0.0f    // calibration fine éventuelle (+/- V, ex. 0.127)
+#define DEBUG_BAT 1        // 1 = log série [BAT] toutes les 5 s (0 pour couper)
 
 float vbatNow = 0.0f;
 int   batPctNow = -1;
@@ -786,10 +791,10 @@ unsigned long tBatMs = 0;
 void updateBattery() {
   if (tBatMs != 0 && millis() - tBatMs < 5000) return;
   tBatMs = millis();
-  long acc = 0;
-  for (int i = 0; i < 8; i++) acc += analogRead(PIN_BAT_ADC);
-  int raw = (int)(acc / 8);
-  vbatNow = raw / 4095.0f * 3.3f * 1.33f;
+  uint32_t acc = 0;
+  for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(PIN_BAT_ADC);
+  int raw = (int)(acc / 8);                  // millivolts sur IO5
+  vbatNow = raw / 1000.0f * BAT_DIV + BAT_OFFSET;
   batPctNow = constrain(map((long)(vbatNow * 100), 330, 420, 0, 100), 0, 100);
   // historique + détection de charge (hystérésis)
   vbatHist[vbatHistIdx] = vbatNow;
@@ -800,7 +805,7 @@ void updateBattery() {
   else if (vbatHistN >= 12 && (vbatNow - oldest) > 0.06f) batCharging = true;
   else if (vbatHistN >= 12 && (oldest - vbatNow) > 0.04f) batCharging = false;
 #if DEBUG_BAT
-  Serial.printf("[BAT] raw=%d vbat=%.2fV pct=%d charge=%d\n",
+  Serial.printf("[BAT] io5=%dmV vbat=%.2fV pct=%d charge=%d\n",
                 raw, vbatNow, batPctNow, batCharging);
 #endif
 }
