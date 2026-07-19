@@ -576,11 +576,15 @@ DOOM_FOV = math.pi / 3.0
 def shade565(c, pct):
     return (int(c[0] * pct / 100), int(c[1] * pct / 100), int(c[2] * pct / 100))
 
+C_CYAN = (0, 255, 255)
+
 def page_doom():
     g = GFX()
     drawHeader(g)
     dmX, dmY, dmA = 1.5, 1.5, 0.0
-    enemies = [(4.5, 1.5, 1), (6.5, 1.5, 1), (10.5, 9.5, 1), (3.5, 13.5, 1), (13.5, 13.5, 1), (14.5, 5.5, 1)]
+    # ennemis typés : (x, y, type) 0=SAYLOR 1=TRUMP 2=LAGARDE
+    enemies = [(4.0, 1.5, 1), (5.0, 1.5, 2), (6.2, 1.5, 0), (10.5, 9.5, 0), (3.5, 13.5, 1), (13.5, 13.5, 2)]
+    DM_NAME = ["SAYLOR", "TRUMP", "LAGARDE"]
     rh = DOOM_BOT - DOOM_TOP
     lvl_pct = (100, 76, 56, 38)
     dmShade = [[shade565(C_ORANGE, p) for p in lvl_pct],
@@ -613,17 +617,44 @@ def page_doom():
         lvl = 3 if dist > 5 else 2 if dist > 3 else 1 if dist > 1.5 else 0
         y0 = DOOM_TOP + (rh - h) // 2
         g.fillRect(i * 4, max(y0, DOOM_TOP), 4, min(h, rh), dmShade[side][lvl])
-    # démons (tri peintre : loin -> près)
+    # affiches Bitcoin (billboards, comme le firmware)
     def normAng(a):
         while a > math.pi: a -= 2 * math.pi
         while a < -math.pi: a += 2 * math.pi
         return a
+    posters = [(2.5, 1.15, "HODL"), (4.5, 1.15, "STACK SATS"), (6.5, 1.15, "BUY THE DIP")]
+    for (px, py, txt) in posters:
+        dx, dy = px - dmX, py - dmY
+        dist = math.hypot(dx, dy)
+        ang = normAng(math.atan2(dy, dx) - dmA)
+        if abs(ang) > DOOM_FOV / 2 + 0.25:
+            continue
+        perp = dist * math.cos(ang)
+        if perp < 0.15:
+            continue
+        sh = int(rh * 0.42 / perp)
+        if sh < 8:
+            continue
+        sw = sh * 2
+        sx = int((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W)
+        yb = DOOM_TOP + (rh + int(rh / perp)) // 2
+        y0 = yb - sh - sh // 3
+        for x in range(max(0, sx - sw // 2), min(SCR_W - 1, sx + sw // 2) + 1):
+            if perp >= zbuf[x // 4]:
+                continue
+            bd = (x <= sx - sw // 2 + 1 or x >= sx + sw // 2 - 1)
+            g.drawFastVLine(x, y0, sh, C_ORANGE if bd else C_PANEL)
+        if sh > 30 and perp < zbuf[max(0, min(DOOM_RAYS - 1, sx // 4))]:
+            ts = 2 if sh > 60 else 1
+            g.text(sx - len(txt) * 3 * ts, y0 + (sh - 8 * ts) // 2, txt, ts, C_ORANGE)
+
+    # démons typés (tri peintre : loin -> près)
     es = []
-    for (ex, ey, st) in enemies:
+    for (ex, ey, typ) in enemies:
         dx, dy = ex - dmX, ey - dmY
-        es.append((dx * dx + dy * dy, ex, ey, st))
+        es.append((dx * dx + dy * dy, ex, ey, typ))
     es.sort(key=lambda t: -t[0])
-    for d2, ex, ey, st in es:
+    for d2, ex, ey, typ in es:
         dx, dy = ex - dmX, ey - dmY
         dist = math.hypot(dx, dy)
         ang = normAng(math.atan2(dy, dx) - dmA)
@@ -638,19 +669,31 @@ def page_doom():
         sx = int((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W)
         yb = DOOM_TOP + (rh + int(rh / perp)) // 2
         cyE = yb - sh // 2
-        lvl = 3 if perp > 5 else 2 if perp > 3 else 1 if perp > 1.5 else 0
         rw = max(2, sh // 3)
+        bodyC = C_ORANGE if typ == 1 else C_BLUE if typ == 2 else C_DGREY
         for x in range(max(0, sx - rw), min(SCR_W - 1, sx + rw) + 1):
             if perp >= zbuf[x // 4]:
                 continue
             u = (x - sx) / rw
             hh = int(sh / 2 * math.sqrt(max(0.0, 1.0 - u * u)))
             if hh > 0:
-                g.drawFastVLine(x, cyE - hh, hh * 2, dmShadeE[lvl])
-        if perp < 4 and st == 1:
+                g.drawFastVLine(x, cyE - hh, hh * 2, bodyC)
+        if perp < 4:
             eyesz = max(2, sh // 20)
-            g.fillRect(sx - sh // 8, cyE - sh // 6, eyesz, eyesz, C_WHITE)
-            g.fillRect(sx + sh // 8 - eyesz, cyE - sh // 6, eyesz, eyesz, C_WHITE)
+            if typ == 0:   # SAYLOR : yeux laser cyan + mini-BTC
+                g.fillRect(sx - sh // 5, cyE - sh // 6, sh // 5, eyesz, C_CYAN)
+                g.fillRect(sx + sh // 10, cyE - sh // 6, sh // 5, eyesz, C_CYAN)
+                g.fillCircle(sx, cyE + sh // 5, eyesz, C_ORANGE)
+            else:
+                g.fillRect(sx - sh // 8, cyE - sh // 6, eyesz, eyesz, C_WHITE)
+                g.fillRect(sx + sh // 8 - eyesz, cyE - sh // 6, eyesz, eyesz, C_WHITE)
+                if typ == 1:   # TRUMP : houppe blonde + cravate rouge
+                    g.fillRect(sx - sh // 6, cyE - sh // 2 + sh // 12, sh // 3, sh // 10, C_YELLOW)
+                    g.fillTriangle(sx - eyesz, cyE + sh // 4, sx + eyesz, cyE + sh // 4, sx, cyE + sh // 2, C_RED)
+                elif typ == 2:   # LAGARDE : col blanc
+                    g.fillRect(sx - eyesz, cyE + sh // 8, eyesz * 2, eyesz, C_WHITE)
+        if perp < 3.5:   # nom au-dessus
+            g.text(sx - len(DM_NAME[typ]) * 3, cyE - sh // 2 - 9, DM_NAME[typ], 1, C_GREY)
     # joysticks (repères fixes)
     g.drawCircle(70, 252, 34, C_DGREY)
     g.drawCircle(288, 252, 34, C_DGREY)
@@ -664,12 +707,13 @@ def page_doom():
         for x in range(16):
             if DM_MAP[y][x]:
                 g.fillRect(8 + x * 3, DOOM_TOP + 4 + y * 3, 3, 3, C_DGREY)
-    for (ex, ey, st) in enemies:
-        if st == 1:
-            g.fillRect(8 + int(ex * 3) - 1, DOOM_TOP + 4 + int(ey * 3) - 1, 3, 3, C_RED)
+    for (ex, ey, typ) in enemies:
+        g.fillRect(8 + int(ex * 3) - 1, DOOM_TOP + 4 + int(ey * 3) - 1, 3, 3, C_RED)
     g.fillRect(8 + int(dmX * 3) - 1, DOOM_TOP + 4 + int(dmY * 3) - 1, 4, 4, C_ORANGE)
     g.text(64, DOOM_TOP + 6, "SCORE", 1, C_GREY)
     g.smooth(64, DOOM_TOP + 14, "300", C_WHITE)
+    # popup kill
+    g.textCenter("SAYLOR DOWN +300", 56, 2, C_ORANGE)
     # FIRE + quitter
     g.fillCircle(356 + 56, 216 + 38, 30, C_RED_D)
     g.text(356 + 56 - 22, 216 + 38 - 8, "FIRE", 2, C_WHITE)

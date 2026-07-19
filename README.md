@@ -40,7 +40,7 @@ watchdog, NTP. **Zero credentials in the code.**
 | 📡 **NODE** | Fear & Greed gauge + your Umbrel node status |
 | 🧠 **LOCAL AI** | 100 % on-device: next-block Poisson model + P(1/5/10 min), fee trend regression, weekly fee cycles learned live (NVS) |
 | 📊 **SIGNALS** | 1D vs 1W trend divergence, Bollinger squeeze, technical score, z-score anomaly alarms |
-| 👾 **BTC DOOM** | A Wolfenstein-style raycaster. Demons hunt you. FIRE button. On a clock. |
+| 👾 **BTC DOOM** | Wolfenstein-style raycaster with **dual multi-touch joysticks** (move + strafe / look). Hunt **Saylor** (tank, laser eyes), **Trump** (fast, blond), **Lagarde** (shoots rate hikes), dodge her projectiles, read the wall slogans — HODL, STACK SATS, FIX THE MONEY. Kill popups, voice taunts, waves. |
 
 ### 📸 Screens — faithful mockups, straight from the draw code
 

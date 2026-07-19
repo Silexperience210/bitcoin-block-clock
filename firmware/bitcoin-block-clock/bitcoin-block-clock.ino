@@ -2147,15 +2147,45 @@ const uint8_t dmMap[DM_H][DM_W] = {
 #define DOOM_FOV  (PI / 3.0f)          // 60°
 #define DM_ENEMIES 6
 
-struct DmEnemy { float x, y; uint8_t st; unsigned long t0; };  // st: 0=mort 1=vif 2=agonise
+// ---- DOOM v2 : ennemis Bitcoin personnalisés ----
+enum { ET_SAYLOR = 0, ET_TRUMP, ET_LAGARDE };
+struct DmEnemy { float x, y; uint8_t st; unsigned long t0;
+                 uint8_t type; int hp; unsigned long hitMs, shootMs; };  // st: 0=mort 1=vif 2=agonise
 DmEnemy  dmE[DM_ENEMIES];
 float    dmX = 1.5f, dmY = 1.5f, dmA = 0.0f;
 float    zbuf[DOOM_RAYS];
 bool     doomReset = true;
 int      doomScore = 0;
+uint8_t  dmWave = 1;
 unsigned long doomShotMs = 0, doomHurtMs = 0, doomLastMs = 0;
 uint16_t dmShade[2][4];                // murs [côté][niveau]
 uint16_t dmShadeE[4];                  // démons [niveau]
+
+const int   DM_HP[3]    = {3, 1, 2};                        // Saylor tank, Trump fragile, Lagarde moyen
+const float DM_SPD[3]   = {0.30f, 0.75f, 0.40f};            // vitesse (cell/s)
+const int   DM_SCORE[3] = {300, 100, 200};                  // score au kill
+const char* DM_NAME[3]  = {"SAYLOR", "TRUMP", "LAGARDE"};
+const char* DM_TTS[3]   = {"Saylor", "Trump", "Lagarde"};
+#define C_CYAN 0x07FF
+#define DOOM_VOICE_TAUNTS 1                                  // taunt vocal au kill (TTS)
+char dmPopup[40] = ""; unsigned long dmPopupMs = 0;          // popup kill / vague
+
+// projectiles de Lagarde ("hausses des taux" esquivables)
+struct DmShot { float x, y, vx, vy; bool on; unsigned long t0; };
+#define DM_NSHOTS 3
+DmShot dmShot[DM_NSHOTS];
+
+// affiches Bitcoin sur les murs (billboards z-bufferés)
+struct DmPoster { float x, y; const char *txt; };
+const DmPoster DM_POSTERS[] = {
+  {2.5f, 1.15f, "HODL"},
+  {4.5f, 1.15f, "STACK SATS"},
+  {6.5f, 1.15f, "BUY THE DIP"},
+  {10.5f, 1.15f, "FIX THE MONEY"},
+  {12.5f, 1.15f, "NOT YOUR KEYS"},
+  {14.5f, 1.15f, "SAYLOR WAS RIGHT"},
+};
+#define DM_NPOSTERS 6
 
 uint16_t shade565(uint16_t c, int pct) {
   uint16_t r = ((c >> 11) & 0x1F) * pct / 100;
@@ -2178,20 +2208,55 @@ void doomSpawn(int i) {
     int x = random(1, DM_W - 1), y = random(1, DM_H - 1);
     if (dmMap[y][x]) continue;
     float ddx = x + 0.5f - dmX, ddy = y + 0.5f - dmY;
-    if (ddx * ddx + ddy * ddy > 16) { dmE[i].x = x + 0.5f; dmE[i].y = y + 0.5f; dmE[i].st = 1; return; }
+    if (ddx * ddx + ddy * ddy > 16) {
+      dmE[i].x = x + 0.5f; dmE[i].y = y + 0.5f; dmE[i].st = 1;
+      dmE[i].hp = DM_HP[dmE[i].type];
+      dmE[i].shootMs = millis() + random(1000, 3000);
+      return;
+    }
   }
   dmE[i].st = 0;                       // pas de place : reste mort
 }
 
 float normAng(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
 
+// affiches Bitcoin : billboards z-bufferés, le texte grandit en approchant
+void doomDrawPoster(int pi) {
+  const DmPoster &p = DM_POSTERS[pi];
+  float dx = p.x - dmX, dy = p.y - dmY;
+  float dist = hypotf(dx, dy);
+  float ang = normAng(atan2f(dy, dx) - dmA);
+  if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) return;
+  float perp = dist * cosf(ang);
+  if (perp < 0.15f) return;
+  int rh = DOOM_BOT - DOOM_TOP;
+  int sh = (int)(rh * 0.42f / perp);
+  if (sh < 8) return;
+  int sw = sh * 2;
+  int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
+  int yb = DOOM_TOP + (rh + (int)(rh / perp)) / 2;
+  int y0 = yb - sh - sh / 3;                       // accrochée à hauteur de mur
+  for (int x = max(0, sx - sw / 2); x <= min(SCR_W - 1, sx + sw / 2); x++) {
+    if (perp >= zbuf[x / DOOM_COLW]) continue;
+    bool bd = (x <= sx - sw / 2 + 1 || x >= sx + sw / 2 - 1);
+    gfx->drawFastVLine(x, y0, sh, bd ? C_ORANGE : C_PANEL);
+  }
+  if (sh > 30 && perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)]) {
+    int ts = sh > 60 ? 2 : 1;
+    gfx->setTextSize(ts); gfx->setTextColor(C_ORANGE);
+    gfx->setCursor(sx - (int)strlen(p.txt) * 3 * ts, y0 + (sh - 8 * ts) / 2);
+    gfx->print(p.txt);
+  }
+}
+
 void drawPageDoom() {
   unsigned long now = millis();
   if (doomReset) {
-    doomReset = false; doomScore = 0;
+    doomReset = false; doomScore = 0; dmWave = 1; dmPopup[0] = 0;
     dmX = 1.5f; dmY = 1.5f; dmA = 0.0f;
     doomInitShades();
-    for (int i = 0; i < DM_ENEMIES; i++) doomSpawn(i);
+    for (int i = 0; i < DM_NSHOTS; i++) dmShot[i].on = false;
+    for (int i = 0; i < DM_ENEMIES; i++) { dmE[i].type = i % 3; doomSpawn(i); }
   }
   float dt = doomLastMs ? min(0.1f, (now - doomLastMs) / 1000.0f) : 0.016f;
   doomLastMs = now;
@@ -2249,32 +2314,85 @@ void drawPageDoom() {
       int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
       int sh = (int)(rh * 0.75f / max(0.1f, perp));
       if (abs(sx - SCR_W / 2) < sh / 3 && perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)]) {
-        dmE[i].st = 2; dmE[i].t0 = now; doomScore += 100;
-        beep(600, 50, 35); beep(900, 70, 35);
+        dmE[i].hitMs = now;
+        if (--dmE[i].hp > 0) {                          // touché mais vivant
+          beep(400, 40, 30);
+        } else {                                        // KILL
+          dmE[i].st = 2; dmE[i].t0 = now; doomScore += DM_SCORE[dmE[i].type];
+          snprintf(dmPopup, sizeof(dmPopup), "%s DOWN +%d", DM_NAME[dmE[i].type], DM_SCORE[dmE[i].type]);
+          dmPopupMs = now;
+          if (dmE[i].type == ET_SAYLOR) { beep(300, 60, 35); beep(450, 60, 35); beep(600, 80, 35); }
+          else if (dmE[i].type == ET_TRUMP) { beep(600, 40, 35); beep(350, 70, 35); }
+          else { beep(700, 50, 35); beep(900, 70, 35); }
+#if DOOM_VOICE_TAUNTS
+          speak(String(DM_TTS[dmE[i].type]) + " down.", SND_UI);
+#endif
+        }
       }
     }
   }
   if (!fireTap) fireHeld = false;
 
-  // ---- ennemis : poursuite + attaque ----
+  // ---- ennemis : poursuite + attaque + tirs + vagues ----
+  float waveBoost = 1.0f + 0.15f * (dmWave - 1); if (waveBoost > 1.6f) waveBoost = 1.6f;
+  bool anyAlive = false;
   for (int i = 0; i < DM_ENEMIES; i++) {
     if (dmE[i].st == 1) {
+      anyAlive = true;
       float dx = dmX - dmE[i].x, dy = dmY - dmE[i].y;
       float d = hypotf(dx, dy);
       if (d > 0.5f) {
-        float sp = 0.45f * dt;
+        float sp = DM_SPD[dmE[i].type] * waveBoost * dt;
         float nx = dmE[i].x + dx / d * sp, ny = dmE[i].y + dy / d * sp;
         if (!dmMap[(int)dmE[i].y][(int)nx]) dmE[i].x = nx;
         if (!dmMap[(int)ny][(int)dmE[i].x]) dmE[i].y = ny;
       } else if (now - doomHurtMs > 1000) {   // touché !
         doomHurtMs = now; doomScore = max(0, doomScore - 50);
         beep(120, 180, 50);
-        doomSpawn(i);                          // le démon se téléporte loin
+        doomSpawn(i);                          // l'ennemi se téléporte loin
+      }
+      // LAGARDE : tire des "hausses des taux" à distance (ligne de vue requise)
+      if (dmE[i].type == ET_LAGARDE && d > 1.2f && d < 7.0f && now - dmE[i].shootMs > 3500) {
+        bool los = true;
+        for (float k = 0.5f; k < d; k += 0.5f)
+          if (dmMap[(int)(dmE[i].y + dy / d * k)][(int)(dmE[i].x + dx / d * k)]) { los = false; break; }
+        if (los) {
+          dmE[i].shootMs = now;
+          for (int s = 0; s < DM_NSHOTS; s++) if (!dmShot[s].on) {
+            dmShot[s].on = true; dmShot[s].t0 = now;
+            dmShot[s].x = dmE[i].x; dmShot[s].y = dmE[i].y;
+            dmShot[s].vx = dx / d * 2.2f; dmShot[s].vy = dy / d * 2.2f;
+            break;
+          }
+          beep(900, 30, 25);
+        }
       }
     } else if (dmE[i].st == 2 && now - dmE[i].t0 > 350) {
       dmE[i].st = 0; dmE[i].t0 = now;          // mort -> respawn plus tard
     } else if (dmE[i].st == 0 && now - dmE[i].t0 > 6000) {
       doomSpawn(i);
+    }
+  }
+  // vague suivante : les 6 tués -> vitesse +15 %
+  static bool wavePending = false;
+  if (!anyAlive && !wavePending) {
+    wavePending = true; dmWave++;
+    snprintf(dmPopup, sizeof(dmPopup), "WAVE %d !", dmWave); dmPopupMs = now;
+    for (int i = 0; i < DM_ENEMIES; i++) { dmE[i].st = 0; dmE[i].t0 = now; }
+  } else if (anyAlive) wavePending = false;
+
+  // ---- projectiles de Lagarde ("hausses des taux") ----
+  for (int s = 0; s < DM_NSHOTS; s++) {
+    if (!dmShot[s].on) continue;
+    dmShot[s].x += dmShot[s].vx * dt; dmShot[s].y += dmShot[s].vy * dt;
+    if (dmMap[(int)dmShot[s].y][(int)dmShot[s].x] || now - dmShot[s].t0 > 4000) { dmShot[s].on = false; continue; }
+    float ddx = dmShot[s].x - dmX, ddy = dmShot[s].y - dmY;
+    if (ddx * ddx + ddy * ddy < 0.12f) {       // le joueur est touché
+      dmShot[s].on = false;
+      if (now - doomHurtMs > 800) {
+        doomHurtMs = now; doomScore = max(0, doomScore - 25);
+        beep(100, 200, 50);
+      }
     }
   }
 
@@ -2307,6 +2425,9 @@ void drawPageDoom() {
     gfx->fillRect(i * DOOM_COLW, max(y0, DOOM_TOP), DOOM_COLW, min(h, rh), dmShade[side][lvl]);
   }
 
+  // ---- affiches Bitcoin sur les murs ----
+  for (int i = 0; i < DM_NPOSTERS; i++) doomDrawPoster(i);
+
   // ---- démons (billboards, tri peintre : loin -> près) ----
   int order[DM_ENEMIES];
   float pd[DM_ENEMIES];
@@ -2335,16 +2456,66 @@ void drawPageDoom() {
     int cyE = yb - sh / 2;
     int lvl = perp > 5 ? 3 : perp > 3 ? 2 : perp > 1.5f ? 1 : 0;
     int rw = max(2, sh / 3);
+    // corps : couleur par type (Saylor sombre, Trump orange, Lagarde bleu),
+    // flash blanc quand touché
+    uint16_t bodyC = (now - dmE[i].hitMs < 120) ? C_WHITE
+                     : dmE[i].type == ET_TRUMP ? C_ORANGE
+                     : dmE[i].type == ET_LAGARDE ? C_BLUE : C_DGREY;
+    (void)lvl;
     for (int x = max(0, sx - rw); x <= min(SCR_W - 1, sx + rw); x++) {
       if (perp >= zbuf[x / DOOM_COLW]) continue;          // occlus par le mur
       float u = (float)(x - sx) / rw;
       int hh = (int)(sh / 2 * sqrtf(max(0.0f, 1.0f - u * u)));
-      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, dmShadeE[lvl]);
+      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, bodyC);
     }
-    if (perp < 4 && dmE[i].st == 1) {                     // yeux quand proche
+    if (perp < 4 && dmE[i].st == 1) {                     // visage quand proche
       int es = max(2, sh / 20);
-      gfx->fillRect(sx - sh / 8, cyE - sh / 6, es, es, C_WHITE);
-      gfx->fillRect(sx + sh / 8 - es, cyE - sh / 6, es, es, C_WHITE);
+      if (dmE[i].type == ET_SAYLOR) {
+        // yeux LASER cyan (l'avatar légendaire de Saylor) + mini-BTC
+        gfx->fillRect(sx - sh / 5, cyE - sh / 6, sh / 5, es, C_CYAN);
+        gfx->fillRect(sx + sh / 10, cyE - sh / 6, sh / 5, es, C_CYAN);
+        gfx->fillCircle(sx, cyE + sh / 5, es, C_ORANGE);
+      } else {
+        gfx->fillRect(sx - sh / 8, cyE - sh / 6, es, es, C_WHITE);
+        gfx->fillRect(sx + sh / 8 - es, cyE - sh / 6, es, es, C_WHITE);
+        if (dmE[i].type == ET_TRUMP) {
+          // houppe blonde + cravate rouge
+          gfx->fillRect(sx - sh / 6, cyE - sh / 2 + sh / 12, sh / 3, sh / 10, C_YELLOW);
+          gfx->fillTriangle(sx - es, cyE + sh / 4, sx + es, cyE + sh / 4, sx, cyE + sh / 2, C_RED);
+        } else if (dmE[i].type == ET_LAGARDE) {
+          // col blanc de la régulatrice
+          gfx->fillRect(sx - es, cyE + sh / 8, es * 2, es, C_WHITE);
+        }
+      }
+    }
+    // nom au-dessus de l'ennemi quand proche
+    if (perp < 3.5f && dmE[i].st == 1) {
+      gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+      gfx->setCursor(sx - (int)strlen(DM_NAME[dmE[i].type]) * 3, cyE - sh / 2 - 9);
+      gfx->print(DM_NAME[dmE[i].type]);
+    }
+  }
+
+  // ---- projectiles de Lagarde (billboards jaunes) ----
+  for (int s = 0; s < DM_NSHOTS; s++) {
+    if (!dmShot[s].on) continue;
+    float dx = dmShot[s].x - dmX, dy = dmShot[s].y - dmY;
+    float dist = hypotf(dx, dy);
+    float ang = normAng(atan2f(dy, dx) - dmA);
+    if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) continue;
+    float perp = dist * cosf(ang);
+    if (perp < 0.15f) continue;
+    int sh = (int)(rh * 0.25f / perp);
+    if (sh < 4) sh = 4;
+    int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
+    int yb = DOOM_TOP + (rh + (int)(rh / perp)) / 2;
+    int cyE = yb - sh;
+    int rw = max(2, sh / 3);
+    for (int x = max(0, sx - rw); x <= min(SCR_W - 1, sx + rw); x++) {
+      if (perp >= zbuf[x / DOOM_COLW]) continue;
+      float u = (float)(x - sx) / rw;
+      int hh = (int)(sh / 2 * sqrtf(max(0.0f, 1.0f - u * u)));
+      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, C_YELLOW);
     }
   }
 
@@ -2384,6 +2555,8 @@ void drawPageDoom() {
   gfx->fillCircle(FIRE_X + FIRE_W / 2, FIRE_Y + FIRE_H / 2, 30, fireTap ? C_RED : C_RED_D);
   gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
   gfx->setCursor(FIRE_X + FIRE_W / 2 - 22, FIRE_Y + FIRE_H / 2 - 8); gfx->print("FIRE");
+  // popup kill / vague
+  if (dmPopup[0] && now - dmPopupMs < 1600) textCenter(dmPopup, 56, 2, C_ORANGE);
   gfx->drawRect(GAME_EX, GAME_EY, GAME_EW, GAME_EH, C_GREY);
   gfx->drawLine(GAME_EX + 8, GAME_EY + 6, GAME_EX + GAME_EW - 9, GAME_EY + GAME_EH - 7, C_RED);
   gfx->drawLine(GAME_EX + GAME_EW - 9, GAME_EY + 6, GAME_EX + 8, GAME_EY + GAME_EH - 7, C_RED);
