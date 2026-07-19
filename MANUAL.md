@@ -34,9 +34,31 @@ Designed by **silexperience**.
 
 ---
 
-## 2. Printing
+## 2. Firmware (do this first — easiest before assembly)
 
-### Version 1 — compact (`boitier_bitcoinclock.stl`)
+1. Install the ESP32 Arduino core **2.0.14** and `GFX Library for Arduino`
+   **v1.4.9 exactly** (+ ArduinoJson v7).
+2. Compile & upload (adapt the port):
+
+```bash
+cd firmware/bitcoin-block-clock
+arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app,CPUFreq=240,USBMode=hwcdc,CDCOnBoot=cdc" .
+arduino-cli upload --fqbn "esp32:esp32:esp32s3" -p COM42 .
+```
+
+3. **Press RESET physically after flashing** (the board can stay in download
+   mode while the COM port is held).
+4. First boot: join the **`BlockClock-Setup`** WiFi AP (password `12345678`),
+   enter your WiFi credentials → the clock reboots on your network as
+   `http://blockclock.local`.
+
+> The case does not block reflashing: on v2, remove the rear shell (4× M3)
+> to reach the board; the boot/reset buttons are inside — flash **before**
+> final assembly if you can.
+
+## 3. Printing
+
+### Version 1 — compact (`case/boitier_bitcoinclock.stl`)
 
 | Setting | Value |
 |---|---|
@@ -47,7 +69,7 @@ Designed by **silexperience**.
 | Layer height | 0.2 mm (0.16 mm for a smoother dome) |
 | Material | ~35–45 g |
 
-### Version 2 — deep (`boitier_deep_avant.stl` + `boitier_deep_arriere.stl`)
+### Version 2 — deep (`case/boitier_deep_avant.stl` + `case/boitier_deep_arriere.stl`)
 
 | Setting | Front frame | Rear shell |
 |---|---|---|
@@ -65,7 +87,7 @@ with **zero repair**.
 
 ---
 
-## 3. Assembly — Version 1
+## 4. Assembly — Version 1
 
 1. Unscrew the 4 corner screws of the board (one at a time, hold the screen).
 2. Seat the board in the front pocket, **screen facing out**, USB-C on the
@@ -79,7 +101,7 @@ with **zero repair**.
 
 ---
 
-## 4. Assembly — Version 2 (deep)
+## 5. Assembly — Version 2 (deep)
 
 1. **Mount the board on the front frame** exactly as in v1 (steps 1–3 above).
    The screw wells are accessible from the rear of the frame while the shell
@@ -99,7 +121,7 @@ with **zero repair**.
 
 ---
 
-## 5. Using the clock
+## 6. Using the clock
 
 - **Power/charging:** plug USB-C on the left side. The board charges the
   battery automatically when present.
@@ -112,7 +134,7 @@ with **zero repair**.
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -123,7 +145,7 @@ with **zero repair**.
 | Case rocks (v1) | Base is stability-checked; ensure the bottom face printed flat (no elephant foot) — sand lightly if needed |
 | Speaker sounds muffled (v2) | Make sure it sits against the grille slots, not against a solid wall |
 
-## 7. Care
+## 8. Care
 
 - Keep away from heat sources (>60 °C softens PLA).
 - If the battery is installed, charge at least every few months.

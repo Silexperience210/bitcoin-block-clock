@@ -1,12 +1,31 @@
-# Boîtier BitcoinClock — Guition JC3248W535
+# Bitcoin Block Clock — firmware + boîtier (Guition JC3248W535)
 
-Deux versions au choix :
+Projet complet, signé **silexperience** :
 
-- **v1 compacte** (`build_case.py`) : coque arrière « galet Alexa » de 20 mm,
-  l'écran nu forme la face avant, fixation par les 4 vis d'origine.
-- **v2 profonde ~15 cm** (`build_case_deep.py`) : version 2 pièces pour
-  **haut-parleur + batterie 2000 mAh**, style « mini TV rétro / Echo Show »,
-  avec grille haut-parleur au dos.
+- **Firmware** (`firmware/`) : horloge Bitcoin vitrine V4 — 9 pages (prix,
+  on-chain, cube, pools war, lightning, nœud, IA locale, signaux, BTC DOOM),
+  architecture FreeRTOS, alertes sonores, portail WiFi. Documentation de
+  développement : [`firmware/PROJET-NOTES.md`](firmware/PROJET-NOTES.md).
+- **Boîtier** (`case/`) : deux versions au choix —
+  - **v1 compacte** (`case/build_case.py`) : coque arrière « galet Alexa » de
+    20 mm, l'écran nu forme la face avant, fixation par les 4 vis d'origine.
+  - **v2 profonde ~15 cm** (`case/build_case_deep.py`) : version 2 pièces pour
+    **haut-parleur + batterie 2000 mAh**, style « mini TV rétro / Echo Show »,
+    avec grille haut-parleur au dos.
+
+Compilation / flash du firmware : voir [README.md](README.md) (anglais).
+Manuel d'utilisation : [MANUAL.md](MANUAL.md) (anglais).
+
+---
+
+## v2 — Version profonde (2 pièces)
+
+| Fichier | Rôle |
+|---|---|
+| `case/boitier_deep_avant.stl` | **Cadre avant** à imprimer (logement carte + puits de vis) |
+| `case/boitier_deep_arriere.stl` | **Coque arrière** à imprimer (~158 mm de haut d'impression) |
+| `case/boitier_deep_*_display.stl` | Mêmes pièces en orientation « posée » |
+| `images/preview_deep.png` | Aperçu de l'ensemble |
 
 ---
 
@@ -65,10 +84,10 @@ sur un bureau.
 
 | Fichier | Rôle |
 |---|---|
-| `boitier_bitcoinclock.stl` | **À imprimer** — orienté face avant à plat sur le plateau |
-| `boitier_bitcoinclock_display_orientation.stl` | Même pièce en orientation « posée » (visualisation) |
-| `build_case.py` | Source paramétrique v1 (Python + trimesh/manifold3d) |
-| `build_case_deep.py` | Source paramétrique v2 (2 pièces, ~15 cm) |
+| `case/boitier_bitcoinclock.stl` | **À imprimer** — orienté face avant à plat sur le plateau |
+| `case/boitier_bitcoinclock_display_orientation.stl` | Même pièce en orientation « posée » (visualisation) |
+| `case/build_case.py` | Source paramétrique v1 (Python + trimesh/manifold3d) |
+| `case/build_case_deep.py` | Source paramétrique v2 (2 pièces, ~15 cm) |
 | `images/preview.png`, `images/preview_pose.png`, `images/preview_deep.png` | Aperçus 3D |
 | `ref/` | Photos fabricant et boîtier de référence (mesures) |
 
@@ -114,8 +133,8 @@ sur un bureau.
 ```bash
 python -m venv .venv
 .venv/Scripts/pip install trimesh manifold3d numpy scipy shapely networkx rtree matplotlib pillow mapbox_earcut
-.venv/Scripts/python build_case.py        # v1 compacte
-.venv/Scripts/python build_case_deep.py   # v2 profonde (~15 cm)
+.venv/Scripts/python case/build_case.py        # v1 compacte
+.venv/Scripts/python case/build_case_deep.py   # v2 profonde (~15 cm)
 ```
 
 Paramètres en tête des scripts : dimensions carte, entraxe des vis
