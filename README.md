@@ -16,7 +16,7 @@
 ![Pages](https://img.shields.io/badge/Pages-9-F7931A?style=for-the-badge)
 ![By](https://img.shields.io/badge/by-silexperience-F7931A?style=for-the-badge)
 
-![Star it](https://img.shields.io/badge/%E2%AD%90%20Star%20it-if%20you%20like%20it-F7931A?style=for-the-badge)
+[![GitHub stars](https://img.shields.io/github/stars/Silexperience210/bitcoin-block-clock?style=for-the-badge&logo=github&color=F7931A)](https://github.com/Silexperience210/bitcoin-block-clock/stargazers)
 
 </div>
 
