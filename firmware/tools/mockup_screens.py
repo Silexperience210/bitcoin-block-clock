@@ -174,11 +174,18 @@ def drawTabIcon(g, i, cx, cy, c):
 def drawHeader(g):
     g.text(10, 8, "21:37", 2, C_WHITE)
     g.text(78, 12, "19/07", 1, C_DGREY)
-    for i in range(3):
-        g.fillCircle(414 + i * 9, 13, 3, C_GREEN if i == 0 else C_GREY)
+    # wifi : dot 1 = état (vert), dots 2-3 = force du signal
+    g.fillCircle(384, 13, 3, C_GREEN)
+    g.fillCircle(393, 13, 3, C_GREEN)
+    g.fillCircle(402, 13, 3, C_GREEN)
+    # batterie : % + icône + éclair de charge
+    bps = "80%"
+    g.text(432 - len(bps) * 6, 12, bps, 1, C_GREY)
     g.drawRect(444, 7, 28, 12, C_GREY)
     g.fillRect(472, 10, 3, 6, C_GREY)
     g.fillRect(446, 9, int(24 * 0.80), 8, C_GREEN)
+    g.fillTriangle(439, 5, 434, 13, 438, 13, C_YELLOW)
+    g.fillTriangle(441, 19, 438, 11, 443, 11, C_YELLOW)
     g.drawFastHLine(0, 26, SCR_W, C_LINE)
 
 def drawFooter(g, page):

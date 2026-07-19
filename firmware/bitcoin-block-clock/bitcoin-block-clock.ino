@@ -770,9 +770,45 @@ void drawArrow(int x, int y, bool up, uint16_t color) {
   else    gfx->fillTriangle(x, y, x + 5, y + 8, x + 10, y, color);
 }
 
+// ---------- batterie : lecture cache + détection de charge ----------
+// Le diviseur R26/R27 (33K/100K) donne IO5 = VBAT x 0.752 -> VBAT = VIO5 x 1.33.
+// Pas de senseur VBUS sur la carte : la charge USB est détectée par la TENSION
+// (VBAT >= 4.25 V => l'USB force, ou hausse nette sur ~90 s => charge en cours).
+#define DEBUG_BAT 1   // 1 = log série [BAT] toutes les 5 s (0 pour couper)
+
+float vbatNow = 0.0f;
+int   batPctNow = -1;
+bool  batCharging = false;
+float vbatHist[18];               // 1 échantillon / 5 s -> fenêtre ~90 s
+uint8_t vbatHistN = 0, vbatHistIdx = 0;
+unsigned long tBatMs = 0;
+
+void updateBattery() {
+  if (tBatMs != 0 && millis() - tBatMs < 5000) return;
+  tBatMs = millis();
+  long acc = 0;
+  for (int i = 0; i < 8; i++) acc += analogRead(PIN_BAT_ADC);
+  int raw = (int)(acc / 8);
+  vbatNow = raw / 4095.0f * 3.3f * 1.33f;
+  batPctNow = constrain(map((long)(vbatNow * 100), 330, 420, 0, 100), 0, 100);
+  // historique + détection de charge (hystérésis)
+  vbatHist[vbatHistIdx] = vbatNow;
+  vbatHistIdx = (vbatHistIdx + 1) % 18;
+  if (vbatHistN < 18) vbatHistN++;
+  float oldest = vbatHist[vbatHistIdx];      // la plus ancienne de la fenêtre
+  if (vbatNow >= 4.25f) batCharging = true;
+  else if (vbatHistN >= 12 && (vbatNow - oldest) > 0.06f) batCharging = true;
+  else if (vbatHistN >= 12 && (oldest - vbatNow) > 0.04f) batCharging = false;
+#if DEBUG_BAT
+  Serial.printf("[BAT] raw=%d vbat=%.2fV pct=%d charge=%d\n",
+                raw, vbatNow, batPctNow, batCharging);
+#endif
+}
+
 int batteryPct() {
-  float vbat = analogRead(PIN_BAT_ADC) / 4095.0f * 3.3f * 1.33f;
-  return constrain(map((long)(vbat * 100), 330, 420, 0, 100), 0, 100);
+  if (batPctNow >= 0) return batPctNow;
+  updateBattery();
+  return batPctNow >= 0 ? batPctNow : 0;
 }
 
 // snapshots protégés des chaînes partagées
@@ -843,15 +879,28 @@ void drawHeader() {
   gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
   gfx->setCursor(78, 12);
   if (getLocalTime(&t, 50)) gfx->printf("%02d/%02d", t.tm_mday, t.tm_mon + 1);
-  // wifi
+  // wifi : dot 1 = état (vert connecté / rouge déconnecté),
+  //        dots 2-3 = force du signal (RSSI)
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
-  for (int i = 0; i < 3; i++)
-    gfx->fillCircle(414 + i * 9, 13, 3, wifiOk ? (i == 0 ? C_GREEN : C_GREY) : C_RED);
-  // batterie
+  gfx->fillCircle(384, 13, 3, wifiOk ? C_GREEN : C_RED);
+  long rssi = wifiOk ? WiFi.RSSI() : -127;
+  gfx->fillCircle(393, 13, 3, wifiOk && rssi > -70 ? C_GREEN : C_DGREY);
+  gfx->fillCircle(402, 13, 3, wifiOk && rssi > -55 ? C_GREEN : C_DGREY);
+  // batterie : % numérique + icône, éclair jaune quand la charge est détectée
   int bp = batteryPct();
+  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+  char bps[8];
+  if (batPctNow >= 0) snprintf(bps, sizeof(bps), "%d%%", bp);
+  else strlcpy(bps, "--", sizeof(bps));
+  gfx->setCursor(432 - (int)strlen(bps) * 6, 12);
+  gfx->print(bps);
   gfx->drawRect(444, 7, 28, 12, C_GREY);
   gfx->fillRect(472, 10, 3, 6, C_GREY);
   gfx->fillRect(446, 9, (int)(24 * bp / 100.0f), 8, bp > 25 ? C_GREEN : C_RED);
+  if (batCharging) {          // petit éclair entre le % et l'icône batterie
+    gfx->fillTriangle(439, 5, 434, 13, 438, 13, C_YELLOW);
+    gfx->fillTriangle(441, 19, 438, 11, 443, 11, C_YELLOW);
+  }
   gfx->drawFastHLine(0, 26, SCR_W, C_LINE);
 }
 
@@ -2194,6 +2243,7 @@ void setup() {
 void loop() {
   server.handleClient();
   unsigned long now = millis();
+  updateBattery();          // batterie : lecture cache + détection de charge (5 s)
 
   // ---------- mode nuit + tick minute (horloge du header) ----------
   struct tm t;
