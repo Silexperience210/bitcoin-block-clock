@@ -493,6 +493,32 @@ bool readTouch(uint16_t &x, uint16_t &y) {
   return true;
 }
 
+// lecture multi-touch AXS15231B : 6 octets par doigt (jusqu'à 5).
+// ev : 1 = relevé, sinon pression. Retourne le nombre de doigts.
+int readTouchMulti(uint16_t *xs, uint16_t *ys, uint8_t *ev, int maxPts) {
+  static const uint8_t cmd[8] = {0xB5, 0xAB, 0xA5, 0x5A, 0, 0, 0, 0x08};
+  Wire.beginTransmission(TP_ADDR);
+  Wire.write(cmd, 8);
+  if (Wire.endTransmission(false) != 0) return 0;
+  int want = maxPts * 6;
+  if (Wire.requestFrom(TP_ADDR, (uint8_t)want) != want) return 0;
+  uint8_t d[30];
+  for (int i = 0; i < want; i++) d[i] = Wire.read();
+  if (d[1] == 0) return 0;
+  int n = min((int)d[1], maxPts), cnt = 0;
+  for (int i = 0; i < n; i++) {
+    int o = i * 6;
+    uint16_t rx = ((d[o + 2] & 0x0F) << 8) | d[o + 3];
+    uint16_t ry = ((d[o + 4] & 0x0F) << 8) | d[o + 5];
+    uint16_t x = ry, y = (PANEL_W - 1) - rx;
+    if (x >= SCR_W) x = SCR_W - 1;
+    if (y >= SCR_H) y = SCR_H - 1;
+    xs[cnt] = x; ys[cnt] = y; ev[cnt] = (d[o + 2] >> 6) & 0x03;
+    cnt++;
+  }
+  return cnt;
+}
+
 // =====================================================================
 //  CONFIG NVS + PORTAIL WEB
 // =====================================================================
@@ -2171,42 +2197,46 @@ void drawPageDoom() {
   doomLastMs = now;
   int rh = DOOM_BOT - DOOM_TOP;
 
-  // ---- contrôle : deux joysticks façon FPS mobile ----
-  // zone GAUCHE (x < 240) : joystick déplacement — vertical = avant/arrière,
-  //                         horizontal = STRAFE gauche/droite
-  // zone DROITE (x >= 240) : joystick regard — horizontal = tourner
-  // (FIRE et ✕ conservés ; la zone est verrouillée à la pose du doigt)
-  static int pTX = -1, pTY = -1, pZone = 0;
-  static int joyBX = 0, joyBY = 0, joyKX = 0, joyKY = 0;   // base + knob actif
+  // ---- contrôle : deux joysticks MULTI-TOUCH (doigts indépendants) ----
+  // doigt zone GAUCHE (x < 240) : déplacement — vertical = avant/arrière,
+  //                               horizontal = STRAFE gauche/droite
+  // doigt zone DROITE (x >= 240) : regard — horizontal = tourner
+  // (FIRE et ✕ conservés ; base flottante à la pose de chaque doigt)
+  static struct Finger { bool on; int bx, by, kx, ky; } fL = {false}, fR = {false};
   static bool fireHeld = false;
-  bool onExit = (gTX >= GAME_EX && gTX <= GAME_EX + GAME_EW && gTY >= GAME_EY && gTY <= GAME_EY + GAME_EH);
-  bool onFire = (gTX >= FIRE_X && gTX <= FIRE_X + FIRE_W && gTY >= FIRE_Y && gTY <= FIRE_Y + FIRE_H);
-  if (gTouch && !onExit && !onFire) {
-    if (pTX < 0) {   // pose du doigt : verrouille la zone et la base du joystick
-      pTX = gTX; pTY = gTY;
-      pZone = (gTX < SCR_W / 2) ? 1 : 2;
-      joyBX = gTX; joyBY = gTY;
-    }
-    if (pZone == 1) {
-      // joystick déplacement : vitesse ∝ déport depuis la base, chaque frame
-      float fwd = (joyBY - (int)gTY) * 1.5f / 48.0f * dt;    // max ~1.5 cell/s
-      float lat = ((int)gTX - joyBX) * 1.5f / 48.0f * dt;    // strafe (perpendiculaire)
-      if (fwd > 0.2f) fwd = 0.2f; if (fwd < -0.2f) fwd = -0.2f;
-      if (lat > 0.2f) lat = 0.2f; if (lat < -0.2f) lat = -0.2f;
-      float nx = dmX + cosf(dmA) * fwd - sinf(dmA) * lat;
-      float ny = dmY + sinf(dmA) * fwd + cosf(dmA) * lat;
-      if (!dmMap[(int)dmY][(int)nx]) dmX = nx;
-      if (!dmMap[(int)ny][(int)dmX]) dmY = ny;
-      joyKX = gTX; joyKY = gTY;
+  uint16_t txs[2], tys[2]; uint8_t tev[2];
+  int nt = readTouchMulti(txs, tys, tev, 2);
+  bool seenL = false, seenR = false, fireTap = false;
+  for (int i = 0; i < nt; i++) {
+    if (tev[i] == 1) continue;                          // doigt relevé
+    int x = txs[i], y = tys[i];
+    bool onFire = (x >= FIRE_X && x <= FIRE_X + FIRE_W && y >= FIRE_Y && y <= FIRE_Y + FIRE_H);
+    if (onFire && !fR.on) { fireTap = true; continue; } // doigt posé sur FIRE : pas un joystick
+    if (x < SCR_W / 2) {
+      if (!fL.on) { fL.on = true; fL.bx = x; fL.by = y; }
+      fL.kx = x; fL.ky = y; seenL = true;
     } else {
-      // joystick regard : vitesse de rotation ∝ déport horizontal
-      dmA += ((int)gTX - joyBX) * 2.5f / 48.0f * dt;         // max ~2.5 rad/s
-      joyKX = gTX; joyKY = gTY;
+      if (!fR.on) { fR.on = true; fR.bx = x; fR.by = y; }
+      fR.kx = x; fR.ky = y; seenR = true;
     }
-    pTX = gTX; pTY = gTY;
-  } else { pTX = pTY = -1; pZone = 0; }
+  }
+  if (!seenL) fL.on = false;
+  if (!seenR) fR.on = false;
+  // déplacement : vitesse ∝ déport du joystick gauche (chaque frame)
+  if (fL.on) {
+    float fwd = (fL.by - fL.ky) * 1.5f / 48.0f * dt;        // max ~1.5 cell/s
+    float lat = (fL.kx - fL.bx) * 1.5f / 48.0f * dt;        // strafe (perpendiculaire)
+    if (fwd > 0.2f) fwd = 0.2f; if (fwd < -0.2f) fwd = -0.2f;
+    if (lat > 0.2f) lat = 0.2f; if (lat < -0.2f) lat = -0.2f;
+    float nx = dmX + cosf(dmA) * fwd - sinf(dmA) * lat;
+    float ny = dmY + sinf(dmA) * fwd + cosf(dmA) * lat;
+    if (!dmMap[(int)dmY][(int)nx]) dmX = nx;
+    if (!dmMap[(int)ny][(int)dmX]) dmY = ny;
+  }
+  // regard : vitesse de rotation ∝ déport du joystick droit
+  if (fR.on) dmA += (fR.kx - fR.bx) * 2.5f / 48.0f * dt;    // max ~2.5 rad/s
 
-  if (gTouch && onFire && !fireHeld) {   // TIR (hitscan)
+  if (fireTap && !fireHeld) {            // TIR (hitscan)
     fireHeld = true; doomShotMs = now;
     beep(160, 60, 45);
     for (int i = 0; i < DM_ENEMIES; i++) {
@@ -2224,7 +2254,7 @@ void drawPageDoom() {
       }
     }
   }
-  if (!gTouch) fireHeld = false;
+  if (!fireTap) fireHeld = false;
 
   // ---- ennemis : poursuite + attaque ----
   for (int i = 0; i < DM_ENEMIES; i++) {
@@ -2318,15 +2348,17 @@ void drawPageDoom() {
     }
   }
 
-  // ---- joysticks : repères fixes + base/knob du doigt actif ----
+  // ---- joysticks : repères fixes + base/knob de chaque doigt actif ----
   gfx->drawCircle(70, 252, 34, C_DGREY);                     // repère joystick gauche
   gfx->drawCircle(288, 252, 34, C_DGREY);                    // repère joystick regard
-  if (pZone != 0) {
-    gfx->drawCircle(joyBX, joyBY, 34, C_GREY);               // base flottante
-    int kx = joyKX, ky = joyKY;                              // knob clampé à 34 px
-    int ddx = joyKX - joyBX, ddy = joyKY - joyBY;
+  for (int f = 0; f < 2; f++) {
+    const Finger &fg = f ? fR : fL;
+    if (!fg.on) continue;
+    gfx->drawCircle(fg.bx, fg.by, 34, C_GREY);               // base flottante
+    int kx = fg.kx, ky = fg.ky;                              // knob clampé à 34 px
+    int ddx = fg.kx - fg.bx, ddy = fg.ky - fg.by;
     float dd = hypotf((float)ddx, (float)ddy);
-    if (dd > 34) { kx = joyBX + (int)(ddx * 34 / dd); ky = joyBY + (int)(ddy * 34 / dd); }
+    if (dd > 34) { kx = fg.bx + (int)(ddx * 34 / dd); ky = fg.by + (int)(ddy * 34 / dd); }
     gfx->fillCircle(kx, ky, 13, C_ORANGE);
   }
 
@@ -2349,7 +2381,7 @@ void drawPageDoom() {
   gfx->setCursor(64, DOOM_TOP + 6); gfx->print("SCORE");
   char sc[8]; snprintf(sc, sizeof(sc), "%d", doomScore);
   drawSmooth(64, DOOM_TOP + 14, sc, C_WHITE, C_BG);
-  gfx->fillCircle(FIRE_X + FIRE_W / 2, FIRE_Y + FIRE_H / 2, 30, onFire ? C_RED : C_RED_D);
+  gfx->fillCircle(FIRE_X + FIRE_W / 2, FIRE_Y + FIRE_H / 2, 30, fireTap ? C_RED : C_RED_D);
   gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
   gfx->setCursor(FIRE_X + FIRE_W / 2 - 22, FIRE_Y + FIRE_H / 2 - 8); gfx->print("FIRE");
   gfx->drawRect(GAME_EX, GAME_EY, GAME_EW, GAME_EH, C_GREY);
@@ -2538,8 +2570,8 @@ void loop() {
     unsigned long dt = now - touchStart;
     wasTouched = false;
     if (touchIgnored) touchIgnored = false;
-    else if (dt > 1200 && !touchMoved) {
-      // appui long (immobile) : veille — valable sur toutes les pages, DOOM compris
+    else if (dt > 1200 && !touchMoved && page != PG_DOOM) {
+      // appui long (immobile) : veille — désactivé sur DOOM (joysticks tenus)
       sleeping = !sleeping;
       setBacklight(sleeping ? 0 : (nightMode ? 15 : 70));
       if (!sleeping) needRedraw = true; else { gfx->fillScreen(C_BG); gfx->flush(); }
