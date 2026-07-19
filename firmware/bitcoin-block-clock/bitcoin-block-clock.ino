@@ -285,12 +285,14 @@ QueueHandle_t sndTxtQ = NULL;
 void speakSam(const char *textEn) {
   char tmp[256];
   strlcpy(tmp, textEn, sizeof(tmp));
-  if (!TextToPhonemes((unsigned char*)tmp)) return;   // anglais -> phonèmes (en place)
+  int ok1 = TextToPhonemes((unsigned char*)tmp);
+  if (!ok1) return;
   SetInput(tmp);
   SetSpeed(SAM_SPEED); SetPitch(SAM_PITCH);
   SetMouth(SAM_MOUTH); SetThroat(SAM_THROAT);
-  if (!SAMMain()) return;
-  int n = GetBufferLength();
+  int ok2 = SAMMain();
+  if (!ok2) return;
+  int n = GetBufferLength() / 50;            // SAM compte en 1/50e d'échantillon
   char *buf = GetBuffer();
   Serial.printf("[SAM] \"%s\" -> %d samples\n", textEn, n);
   const int chunk = 512;
