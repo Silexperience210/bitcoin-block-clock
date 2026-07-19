@@ -886,21 +886,17 @@ void drawHeader() {
   long rssi = wifiOk ? WiFi.RSSI() : -127;
   gfx->fillCircle(393, 13, 3, wifiOk && rssi > -70 ? C_GREEN : C_DGREY);
   gfx->fillCircle(402, 13, 3, wifiOk && rssi > -55 ? C_GREEN : C_DGREY);
-  // batterie : % numérique + icône, éclair jaune quand la charge est détectée
+  // batterie : icône avec le % intégré (lecture GPIO5, diviseur R26/R27)
   int bp = batteryPct();
-  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  char bps[8];
-  if (batPctNow >= 0) snprintf(bps, sizeof(bps), "%d%%", bp);
-  else strlcpy(bps, "--", sizeof(bps));
-  gfx->setCursor(432 - (int)strlen(bps) * 6, 12);
-  gfx->print(bps);
   gfx->drawRect(444, 7, 28, 12, C_GREY);
   gfx->fillRect(472, 10, 3, 6, C_GREY);
   gfx->fillRect(446, 9, (int)(24 * bp / 100.0f), 8, bp > 25 ? C_GREEN : C_RED);
-  if (batCharging) {          // petit éclair entre le % et l'icône batterie
-    gfx->fillTriangle(439, 5, 434, 13, 438, 13, C_YELLOW);
-    gfx->fillTriangle(441, 19, 438, 11, 443, 11, C_YELLOW);
-  }
+  gfx->setTextSize(1); gfx->setTextColor(C_WHITE);
+  char bps[8];
+  if (batPctNow >= 0) snprintf(bps, sizeof(bps), "%d%%", bp);
+  else strlcpy(bps, "--", sizeof(bps));
+  gfx->setCursor(444 + (28 - (int)strlen(bps) * 6) / 2, 9);
+  gfx->print(bps);
   gfx->drawFastHLine(0, 26, SCR_W, C_LINE);
 }
 

@@ -178,14 +178,12 @@ def drawHeader(g):
     g.fillCircle(384, 13, 3, C_GREEN)
     g.fillCircle(393, 13, 3, C_GREEN)
     g.fillCircle(402, 13, 3, C_GREEN)
-    # batterie : % + icône + éclair de charge
+    # batterie : icône avec % intégré
     bps = "80%"
-    g.text(432 - len(bps) * 6, 12, bps, 1, C_GREY)
     g.drawRect(444, 7, 28, 12, C_GREY)
     g.fillRect(472, 10, 3, 6, C_GREY)
     g.fillRect(446, 9, int(24 * 0.80), 8, C_GREEN)
-    g.fillTriangle(439, 5, 434, 13, 438, 13, C_YELLOW)
-    g.fillTriangle(441, 19, 438, 11, 443, 11, C_YELLOW)
+    g.text(444 + (28 - len(bps) * 6) // 2, 9, bps, 1, C_WHITE)
     g.drawFastHLine(0, 26, SCR_W, C_LINE)
 
 def drawFooter(g, page):
