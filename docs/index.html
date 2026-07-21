@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitcoin Block Clock — Web Flasher</title>
+<meta name="description" content="Flash the Bitcoin Block Clock firmware to your Guition JC3248W535 (ESP32-S3) directly from the browser. No toolchain, no drivers.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+:root{
+  --bg:#0B0B0F; --panel:#15151B; --panel2:#1B1B22; --line:#26262E;
+  --ink:#E8E4DA; --dim:#8A8A94; --faint:#55555E;
+  --btc:#F7931A; --btc-deep:#B8650A; --red:#C63A2F; --green:#3FBF6F;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 "IBM Plex Sans",system-ui,sans-serif;overflow-x:hidden}
+::selection{background:var(--btc);color:#000}
+
+/* ---------- top status bar (mirrors the device header) ---------- */
+.statusbar{display:flex;justify-content:space-between;align-items:center;
+  padding:10px 24px;border-bottom:1px solid var(--line);
+  font:500 12px/1 "IBM Plex Mono",monospace;letter-spacing:.12em;color:var(--dim)}
+.statusbar b{color:var(--btc);font-weight:500}
+.statusbar .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--green);margin-right:8px;animation:pulse 2.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ---------- hero ---------- */
+.hero{max-width:1120px;margin:0 auto;padding:72px 24px 48px;
+  display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+.eyebrow{font:600 12px/1 "Rajdhani",sans-serif;letter-spacing:.34em;
+  color:var(--btc);text-transform:uppercase;margin-bottom:18px}
+h1{font:700 clamp(44px,6vw,72px)/0.98 "Rajdhani",sans-serif;
+  text-transform:uppercase;letter-spacing:.01em}
+h1 .stroke{color:transparent;-webkit-text-stroke:1.5px var(--btc)}
+.hero p.lead{margin:22px 0 34px;color:var(--dim);max-width:46ch;font-size:17px}
+.hero p.lead strong{color:var(--ink);font-weight:500}
+
+/* the button — ESP Web Tools activation slot */
+.flash-btn{display:inline-flex;align-items:center;gap:14px;cursor:pointer;
+  background:var(--btc);color:#0B0B0F;border:0;
+  font:700 20px/1 "Rajdhani",sans-serif;letter-spacing:.18em;text-transform:uppercase;
+  padding:20px 44px;position:relative;overflow:hidden;
+  box-shadow:0 0 0 1px var(--btc-deep), 0 12px 40px -12px rgba(247,147,26,.55);
+  transition:transform .15s ease, box-shadow .15s ease}
+.flash-btn:hover{transform:translateY(-2px);
+  box-shadow:0 0 0 1px var(--btc), 0 18px 48px -12px rgba(247,147,26,.75)}
+.flash-btn:active{transform:translateY(0)}
+.flash-btn::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(115deg,transparent 35%,rgba(255,255,255,.5) 50%,transparent 65%);
+  transform:translateX(-120%);animation:sheen 3.4s infinite}
+@keyframes sheen{0%,55%{transform:translateX(-120%)}85%,100%{transform:translateX(120%)}}
+.flash-btn .chev{font-family:"IBM Plex Mono";font-weight:500;font-size:16px}
+.reqs{margin-top:18px;font:400 13px/1.7 "IBM Plex Mono",monospace;color:var(--faint)}
+.reqs span{color:var(--dim)}
+.browser-warn{margin-top:14px;padding:12px 16px;border:1px solid var(--red);
+  color:#E0968F;font:400 13px/1.5 "IBM Plex Mono",monospace;max-width:52ch;display:none}
+
+/* ---------- live device replica (signature element) ---------- */
+.device{position:relative;justify-self:center}
+.device .shell{background:#101014;border:1px solid var(--line);border-radius:14px;
+  padding:14px;box-shadow:0 30px 80px -30px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.04)}
+.device canvas{display:block;width:480px;max-width:100%;border-radius:6px;background:#0a0a0e}
+.device .cap{margin-top:12px;text-align:center;
+  font:500 11px/1 "IBM Plex Mono",monospace;letter-spacing:.2em;color:var(--faint)}
+.device .scan{pointer-events:none;position:absolute;inset:14px 14px 38px;border-radius:6px;overflow:hidden}
+.device .scan::before{content:"";position:absolute;left:0;right:0;height:56px;top:-60px;
+  background:linear-gradient(180deg,transparent,rgba(247,147,26,.06),transparent);
+  animation:scan 5s linear infinite}
+@keyframes scan{to{top:110%}}
+
+/* ---------- ticker (moving text) ---------- */
+.ticker{border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  overflow:hidden;white-space:nowrap;background:var(--panel);padding:13px 0}
+.ticker .rail{display:inline-block;animation:rail 34s linear infinite;
+  font:500 13px/1 "IBM Plex Mono",monospace;letter-spacing:.22em;color:var(--dim)}
+.ticker .rail b{color:var(--btc);font-weight:500}
+.ticker:hover .rail{animation-play-state:paused}
+@keyframes rail{to{transform:translateX(-50%)}}
+
+/* ---------- sections ---------- */
+section{max-width:1120px;margin:0 auto;padding:72px 24px}
+.sec-title{font:700 26px/1 "Rajdhani",sans-serif;text-transform:uppercase;
+  letter-spacing:.14em;margin-bottom:8px}
+.sec-sub{color:var(--dim);margin-bottom:40px;max-width:60ch}
+
+/* steps — a real sequence, so numbers carry meaning */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.step{background:var(--panel);border:1px solid var(--line);padding:26px;
+  opacity:0;transform:translateY(18px);transition:opacity .6s ease,transform .6s ease}
+.step.in{opacity:1;transform:none}
+.step .n{font:700 15px/1 "Rajdhani";letter-spacing:.2em;color:var(--btc);margin-bottom:14px}
+.step h3{font:600 19px/1.2 "Rajdhani";text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.step p{color:var(--dim);font-size:14.5px}
+.step p code{font:400 13px "IBM Plex Mono";color:var(--ink)}
+
+/* terminal boot sequence (typed) */
+.term{background:#0D0D12;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.term .bar{display:flex;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line)}
+.term .bar i{width:10px;height:10px;border-radius:50%;background:var(--line)}
+.term .bar i:first-child{background:var(--red)}
+.term pre{padding:20px 22px;font:400 13.5px/1.85 "IBM Plex Mono",monospace;
+  color:var(--dim);min-height:250px;white-space:pre-wrap}
+.term pre .ok{color:var(--green)}
+.term pre .hi{color:var(--btc)}
+.term pre .cur{display:inline-block;width:8px;height:15px;background:var(--btc);
+  vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* donation */
+.donate{background:linear-gradient(180deg,var(--panel) 0%,var(--panel2) 100%);
+  border:1px solid var(--line);display:grid;grid-template-columns:1fr auto;
+  gap:40px;align-items:center;padding:44px}
+.donate h2{font:700 30px/1.1 "Rajdhani";text-transform:uppercase;letter-spacing:.1em}
+.donate h2 span{color:var(--btc)}
+.donate p{color:var(--dim);margin:14px 0 24px;max-width:52ch}
+.lnrow{display:flex;align-items:stretch;max-width:520px}
+.lnaddr{flex:1;background:#0B0B0F;border:1px solid var(--line);border-right:0;
+  padding:15px 18px;font:500 15px "IBM Plex Mono",monospace;color:var(--btc);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.copy{background:var(--btc);border:0;color:#0B0B0F;cursor:pointer;padding:0 22px;
+  font:700 13px/1 "Rajdhani";letter-spacing:.16em;text-transform:uppercase;
+  transition:background .15s}
+.copy:hover{background:#FFA940}
+.lnlabel{margin-top:10px;font:400 12px "IBM Plex Mono";color:var(--faint);letter-spacing:.1em}
+.qr{background:#fff;padding:12px;border-radius:6px;line-height:0;
+  box-shadow:0 0 0 1px var(--line),0 20px 50px -20px rgba(247,147,26,.35)}
+.qr img{width:172px;height:172px;image-rendering:pixelated}
+
+footer{border-top:1px solid var(--line);padding:26px 24px;display:flex;
+  justify-content:space-between;font:400 12.5px "IBM Plex Mono",monospace;color:var(--faint)}
+footer a{color:var(--dim);text-decoration:none}
+footer a:hover{color:var(--btc)}
+
+@media (max-width:920px){
+  .hero{grid-template-columns:1fr;padding-top:48px}
+  .steps{grid-template-columns:1fr}
+  .donate{grid-template-columns:1fr;justify-items:start}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .step{opacity:1;transform:none}
+}
+</style>
+</head>
+<body>
+
+<div class="statusbar">
+  <span><span class="dot"></span>SILEXPERIENCE // OPEN HARDWARE</span>
+  <span>TARGET <b>ESP32-S3</b> · GUITION JC3248W535</span>
+  <span id="sb-clock">--:--</span>
+</div>
+
+<header class="hero">
+  <div>
+    <div class="eyebrow">Browser installer — no toolchain, no drivers</div>
+    <h1>Bitcoin<br>Block <span class="stroke">Clock</span></h1>
+    <p class="lead">Chain telemetry on your desk: block height, mempool, fees, halving
+      countdown, an honest on-device statistics page — and a DOOM mode.
+      <strong>Plug the board, press the button, ninety seconds later it boots.</strong></p>
+
+    <esp-web-install-button manifest="./manifest.json" id="espbtn">
+      <button slot="activate" class="flash-btn">Flash it <span class="chev">&gt;&gt;</span></button>
+      <span slot="unsupported"></span>
+      <span slot="not-allowed"></span>
+    </esp-web-install-button>
+
+    <p class="reqs">REQUIRES&nbsp; <span>Chrome or Edge (Web Serial)</span> ·
+      <span>USB-C data cable</span> · <span>Guition JC3248W535 board</span></p>
+    <div class="browser-warn" id="warn">Web Serial is not available in this browser.
+      Open this page in Chrome or Edge on desktop to flash.</div>
+  </div>
+
+  <div class="device">
+    <div class="shell">
+      <canvas id="clock" width="480" height="320"></canvas>
+      <div class="cap">LIVE PREVIEW — RENDERED FROM THE FIRMWARE LAYOUT</div>
+    </div>
+    <div class="scan"></div>
+  </div>
+</header>
+
+<div class="ticker" aria-hidden="true">
+  <div class="rail" id="rail"></div>
+</div>
+
+<section id="how">
+  <h2 class="sec-title">Three steps, one cable</h2>
+  <p class="sec-sub">Flashing happens entirely in the browser over Web Serial.
+    Nothing is installed on your computer and nothing leaves it.</p>
+  <div class="steps">
+    <div class="step"><div class="n">STEP 01</div><h3>Connect</h3>
+      <p>Plug the clock into your computer with a USB-C <em>data</em> cable.
+        No driver is needed on Windows 11, macOS or Linux.</p></div>
+    <div class="step"><div class="n">STEP 02</div><h3>Flash it</h3>
+      <p>Press <code>Flash it</code>, pick the serial port
+        (<code>USB JTAG/serial</code>), and keep the tab open while the
+        firmware writes.</p></div>
+    <div class="step"><div class="n">STEP 03</div><h3>Boot</h3>
+      <p>The board restarts on its own and opens a Wi-Fi setup portal
+        (<code>BlockClock-Setup</code>) on first boot. Join it, enter your
+        network, done.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2 class="sec-title">What first boot looks like</h2>
+  <p class="sec-sub">The exact sequence the serial console prints after flashing.</p>
+  <div class="term">
+    <div class="bar"><i></i><i></i><i></i></div>
+    <pre id="bootlog"></pre>
+  </div>
+</section>
+
+<section>
+  <div class="donate">
+    <div>
+      <h2>Built by one person.<br><span>Powered by sats.</span></h2>
+      <p>The Bitcoin Block Clock is free and open source. If it earns a place on
+        your desk, a few sats over Lightning keep the firmware moving.</p>
+      <div class="lnrow">
+        <div class="lnaddr" id="lnaddr">silexperience@21pay.org</div>
+        <button class="copy" id="copybtn">Copy</button>
+      </div>
+      <div class="lnlabel">LIGHTNING ADDRESS — WORKS FROM ANY LN WALLET</div>
+    </div>
+    <div class="qr"><img src="assets/donate-qr.png" alt="Lightning donation QR code for silexperience@21pay.org"></div>
+  </div>
+</section>
+
+<footer>
+  <span>BITCOIN BLOCK CLOCK — SILEXPERIENCE</span>
+  <span><a href="https://github.com/Silexperience210/bitcoin-block-clock">Source on GitHub</a>
+    &nbsp;·&nbsp; firmware GPL — flash at your own risk</span>
+</footer>
+
+<script>
+/* ---------- status bar clock ---------- */
+setInterval(()=>{const d=new Date();
+  document.getElementById('sb-clock').textContent=
+    String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+},1000);
+
+/* ---------- Web Serial support check ---------- */
+if(!('serial' in navigator)) document.getElementById('warn').style.display='block';
+
+/* ---------- ticker content (duplicated for a seamless loop) ---------- */
+const items="BLOCK HEIGHT // MEMPOOL DEPTH // FEE RADAR // HALVING COUNTDOWN // "+
+ "WHALE WATCH // POOL DOMINANCE 1W // HONEST ON-DEVICE STATS // TTM SQUEEZE + "+
+ "CALIBRATED FREQUENCIES // FEAR AND GREED // OWN NODE MONITOR // VOICE ALERTS // BTC DOOM MODE // ";
+document.getElementById('rail').innerHTML=(items+items)
+ .replaceAll('//','<b>//</b>');
+
+/* ---------- live device replica ---------- */
+const cv=document.getElementById('clock'),g=cv.getContext('2d');
+const ORANGE='#F7931A',GREY='#969696',DGREY='#5F5F64',WHITE='#EBEBEB',
+      PANEL='#18181E',BGIN='#0E0E13',GREEN='#3CC86E',RED='#E64636';
+let height=908341,price=118420,mem=61234,fee=12,t=0;
+function mono(s,x,y,size,color,align){g.font=`${size}px "IBM Plex Mono"`;
+  g.fillStyle=color;g.textAlign=align||'left';g.fillText(s,x,y);}
+function rr(x,y,w,h,r,c){g.fillStyle=c;g.beginPath();g.roundRect(x,y,w,h,r);g.fill();}
+function frame(){
+  t++;
+  if(t%180===0){height++;mem=Math.max(4000,mem-1800+((Math.random()*900)|0));}
+  if(t%22===0){price+=((Math.random()*90)|0)-45;mem+=((Math.random()*160)|0)-70;}
+  if(t%300===0)fee=Math.max(2,fee+((Math.random()*5)|0)-2);
+  g.fillStyle='#0A0A0E';g.fillRect(0,0,480,320);
+  /* header */
+  mono('BLOCK CLOCK',14,26,15,ORANGE);
+  mono('WIFI ▮▮▮',400,26,12,DGREY);
+  /* block height — the hero number */
+  g.textAlign='left';
+  g.font='700 74px "Rajdhani"';g.fillStyle=WHITE;
+  g.fillText(height.toLocaleString('en-US').replace(/,/g,' '),14,120);
+  mono('BLOCK HEIGHT',16,143,12,DGREY);
+  /* price panel */
+  rr(300,58,166,88,8,PANEL);
+  mono('BTC / USD',312,78,11,GREY);
+  g.font='600 30px "Rajdhani"';g.fillStyle=ORANGE;
+  g.fillText(price.toLocaleString('en-US'),312,112);
+  mono((price>=118420?'+':'')+((price-118420)/1184).toFixed(2)+'% 24H',312,134,11,
+       price>=118420?GREEN:RED);
+  /* mempool + fees */
+  rr(14,168,222,120,8,PANEL);
+  mono('MEMPOOL',26,190,11,GREY);
+  g.font='600 26px "Rajdhani"';g.fillStyle=WHITE;
+  g.fillText(mem.toLocaleString('en-US')+' TX',26,222);
+  rr(26,238,198,8,4,BGIN);
+  rr(26,238,Math.min(198,mem/380),8,4,ORANGE);
+  mono('FEE '+fee+' SAT/VB',26,270,12,DGREY);
+  /* next block probability — Poisson */
+  rr(250,168,216,120,8,PANEL);
+  mono('NEXT BLOCK',262,190,11,GREY);
+  const el=(t%180)/180;
+  g.font='600 30px "Rajdhani"';g.fillStyle=el<0.7?GREEN:ORANGE;
+  const rem=Math.max(0,594-((t%180)*3.3|0));
+  g.fillText(Math.floor(rem/60)+':'+String(rem%60).padStart(2,'0'),262,224);
+  mono('MEDIAN WAIT',354,224,11,DGREY);
+  rr(262,238,192,8,4,BGIN);
+  rr(262,238,192*el,8,4,el<0.7?ORANGE:RED);
+  mono('EPOCH PACE ~9.8 MIN',262,270,11,DGREY);
+  /* footer strip */
+  mono('HALVING IN '+ (1050000-height).toLocaleString('en-US') +' BLOCKS',14,308,12,DGREY);
+  mono('SQUEEZE PCTL 0 · MOM +2.8%',466,308,12,ORANGE,'right');
+  requestAnimationFrame(frame);
+}
+if(!matchMedia('(prefers-reduced-motion: reduce)').matches)
+  requestAnimationFrame(frame); else frame();
+
+/* ---------- typed boot log ---------- */
+const LOG=[
+ ['','ESP-ROM:esp32s3-20210327  ·  boot: 0x2 (download ok)'],
+ ['ok','[  0.312] display  AXS15231B 480x320 QSPI ......... OK'],
+ ['ok','[  0.688] psram    8 MB mapped .................... OK'],
+ ['',  '[  1.204] wifi     portal "BlockClock-Setup" up'],
+ ['',  '[ 14.512] wifi     joined, rssi -54 dBm'],
+ ['ok','[ 15.020] ntp      synced (CET) ................... OK'],
+ ['hi','[ 15.744] chain    height 908 341 · mempool 61 234 tx'],
+ ['',  '[ 16.101] signals  klines 300d+84w · squeeze pctl 0'],
+ ['ok','[ 16.455] audio    i2s 22050 Hz · voice ready ..... OK'],
+ ['hi','[ 16.500] clock    running — enjoy the blocks.']
+];
+const pre=document.getElementById('bootlog');
+let li=0,ci=0,buf='';
+function type(){
+  if(li>=LOG.length){pre.innerHTML=buf+'<span class="cur"></span>';
+    setTimeout(()=>{buf='';li=0;ci=0;type();},9000);return;}
+  const [cls,line]=LOG[li];
+  if(ci<=line.length){
+    const cur=line.slice(0,ci);
+    pre.innerHTML=buf+(cls?`<span class="${cls}">${cur}</span>`:cur)+'<span class="cur"></span>';
+    ci+=2;setTimeout(type,14);
+  }else{
+    buf+=(cls?`<span class="${cls}">${line}</span>`:line)+'\n';
+    li++;ci=0;setTimeout(type,li===4?600:150);
+  }
+}
+type();
+
+/* ---------- scroll reveal ---------- */
+const io=new IntersectionObserver(es=>es.forEach(e=>{
+  if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}
+}),{threshold:.25});
+document.querySelectorAll('.step').forEach((s,i)=>{
+  s.style.transitionDelay=(i*120)+'ms';io.observe(s);});
+
+/* ---------- copy lightning address ---------- */
+document.getElementById('copybtn').addEventListener('click',async e=>{
+  await navigator.clipboard.writeText('silexperience@21pay.org');
+  e.target.textContent='Copied';setTimeout(()=>e.target.textContent='Copy',1600);
+});
+</script>
+</body>
+</html>

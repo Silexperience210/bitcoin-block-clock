@@ -1,0 +1,55 @@
+# Compile le firmware et publie le binaire merge (offset 0) pour le web flasher.
+# Le binaire atterrit dans docs/bitcoin-block-clock-web.bin, servi par GitHub Pages.
+#
+# NOTE : ajuste le FQBN ci-dessous pour qu'il corresponde EXACTEMENT a tes
+# reglages Arduino IDE pour la JC3248W535 (PSRAM / partition / flash).
+name: build-webflasher-bin
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["firmware/**"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$PWD/bin" >> $GITHUB_PATH
+
+      - name: Install ESP32 core + libraries
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "GFX Library for Arduino" "ArduinoJson" "ESP8266Audio"
+
+      - name: Compile (merged binary)
+        run: |
+          # <-- FQBN a verifier contre tes reglages IDE -->
+          FQBN="esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc"
+          arduino-cli compile --fqbn "$FQBN" \
+            --export-binaries firmware/bitcoin-block-clock
+          # le core esp32 v3 produit deja un .merged.bin (bootloader+partitions+app)
+          MERGED=$(find firmware/bitcoin-block-clock/build -name "*.merged.bin" | head -1)
+          test -n "$MERGED" || { echo "merged bin introuvable"; exit 1; }
+          cp "$MERGED" docs/bitcoin-block-clock-web.bin
+          ls -la docs/bitcoin-block-clock-web.bin
+
+      - name: Commit binary to docs/
+        run: |
+          git config user.name  "flasher-bot"
+          git config user.email "flasher-bot@users.noreply.github.com"
+          git add docs/bitcoin-block-clock-web.bin
+          git diff --cached --quiet || git commit -m "webflasher: rebuild firmware binary [skip ci]"
+          git push
