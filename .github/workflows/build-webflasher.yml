@@ -1,15 +1,16 @@
 # Compile le firmware et publie le binaire merge (offset 0) pour le web flasher.
 # Le binaire atterrit dans docs/bitcoin-block-clock-web.bin, servi par GitHub Pages.
 #
-# NOTE : ajuste le FQBN ci-dessous pour qu'il corresponde EXACTEMENT a tes
-# reglages Arduino IDE pour la JC3248W535 (PSRAM / partition / flash).
+# IMPORTANT : les versions ci-dessous doivent correspondre au README.md
+# (ESP32 Arduino core 2.0.14, GFX Library for Arduino 1.4.9, ArduinoJson 7,
+# ESP8266Audio 1.9.7).
 name: build-webflasher-bin
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["firmware/**"]
+    paths: ["firmware/**", ".github/workflows/build-webflasher.yml"]
 
 permissions:
   contents: write
@@ -25,25 +26,33 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
           echo "$PWD/bin" >> $GITHUB_PATH
 
-      - name: Install ESP32 core + libraries
+      - name: Install ESP32 core (pinned) + libraries (pinned)
         run: |
           arduino-cli config init --overwrite
           arduino-cli config add board_manager.additional_urls \
             https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
-          arduino-cli lib install "GFX Library for Arduino" "ArduinoJson" "ESP8266Audio"
+          arduino-cli core install esp32:esp32@2.0.14
+          arduino-cli lib install "GFX Library for Arduino"@1.4.9 "ArduinoJson"@7.0.0 "ESP8266Audio"@1.9.7
+
+      - name: Install esptool
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install esptool==4.5.1
 
       - name: Compile (merged binary)
         run: |
-          # <-- FQBN a verifier contre tes reglages IDE -->
-          FQBN="esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc"
+          FQBN="esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app,CPUFreq=240,USBMode=hwcdc,CDCOnBoot=cdc"
           arduino-cli compile --fqbn "$FQBN" \
             --export-binaries firmware/bitcoin-block-clock
-          # le core esp32 v3 produit deja un .merged.bin (bootloader+partitions+app)
-          MERGED=$(find firmware/bitcoin-block-clock/build -name "*.merged.bin" | head -1)
-          test -n "$MERGED" || { echo "merged bin introuvable"; exit 1; }
-          cp "$MERGED" docs/bitcoin-block-clock-web.bin
+          BUILD="firmware/bitcoin-block-clock/build/esp32.esp32.esp32s3"
+          test -d "$BUILD" || { echo "build dir introuvable"; exit 1; }
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/bitcoin-block-clock-web.bin \
+            --flash_size 16MB \
+            0x0    "$BUILD/bitcoin-block-clock.ino.bootloader.bin" \
+            0x8000 "$BUILD/bitcoin-block-clock.ino.partitions.bin" \
+            0x10000 "$BUILD/bitcoin-block-clock.ino.bin"
           ls -la docs/bitcoin-block-clock-web.bin
 
       - name: Commit binary to docs/
