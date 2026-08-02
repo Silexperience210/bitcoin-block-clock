@@ -20,7 +20,11 @@ HOLE_DX, HOLE_DY = 84.5, 52.0       # entraxe des 4 vis (trous a 5 mm des bords)
 # aux angles, sur l'axe des vis. Sans logement pour les recevoir, la carte
 # repose dessus et l'ecran ressort du boitier de BOSS_H.
 BOSS_D = 6.0                        # diametre du bossage (a la base)
-BOSS_H = 12.0                       # depassement au-dessus du plan du capot
+BOSS_H = 9.0                        # depassement au-dessus du plan du capot
+# Mesure initiale : 12 mm au pied a coulisse, mais c'etait le MAXIMUM du
+# bossage. Le tirage d'essai a montre l'ecran 3 mm trop enfonce, donc la cote
+# d'appui reelle est 9 mm. Cette valeur pilote directement l'affleurement de
+# l'ecran : +1 mm ici = l'ecran ressort de 1 mm.
 BOSS_BORE_D = BOSS_D + 1.5          # logement : jeu radial de 0.75 par cote
 BOSS_BORE_T = BOSS_H                # le fond du logement EST le plan d'appui.
 #                                     Un seul datum : les bossages portent au
@@ -50,15 +54,21 @@ TILT_DEG = 12.0                     # inclinaison vers l'arriere
 # repere coque (ou x est oriente vu de FACE).
 USB_Y = 4.6                         # legerement au-dessus du milieu
 USB_PASS_X = -42.25                 # ~5 mm du bord de la carte
-USB_PASS_Y = 3.0                    # centre du passage (voir ci-dessous)
+USB_PASS_Y = 4.0                    # centre du passage (voir ci-dessous)
 # Passage volontairement SURDIMENSIONNE : la position exacte du connecteur n'est
 # connue qu'a la photo, et une lumiere trop juste condamnerait l'impression. Le
 # dos n'est pas visible, donc rien n'est perdu a etre large. La hauteur est
 # bornee par le creneau libre de la cloison (y de -14.6 a 20.5, soit 35.1 mm)
 # entre la fente a fils et le plot de vis superieur : 32 mm laissent ~1.5 mm de
 # nervure de chaque cote.
+# Hauteur bornee par DEUX contraintes, pas une seule :
+#   - dans la cloison : entre la fente a fils (finit a -16.6) et le plot de vis
+#     superieur (Ø9 descendant a 21.5)
+#   - dans le capot   : au-dessus de la fraisure de vis basse (sommet a -12.5)
+# La seconde est la plus serree ; 31 mm centres sur +4 laissent 1 mm de marge
+# en bas et 2 mm en haut. verifier_interferences() rejoue ces deux controles.
 USB_PASS_W = 20.0
-USB_PASS_H = 32.0
+USB_PASS_H = 31.0
 
 # ancienne decoupe laterale, conservee pour le v1 compact d'origine
 USB_W, USB_H = 11.0, 5.2
@@ -114,7 +124,10 @@ CAP_SCREW_D = 2.6       # pilote M3 auto-taraudeuse dans le corps
 CAP_SCREW_CLEAR = 3.3   # passage dans le capot
 CAP_SCREW_HEAD = 6.2    # fraisure de tete dans le capot
 CAP_BOSS_D = 8.5        # plot taraude dans le corps
-CAP_BOSS_INSET = 10.0   # retrait des plots depuis le bord du contour
+CAP_BOSS_INSET = 14.0   # retrait des plots depuis le bord du contour
+# A 10 mm les plots mordaient la levre du capot de 2.11 mm et empechaient
+# purement et simplement sa mise en place. A 14 mm il reste 3.54 mm de marge.
+# Le controle verifier_levre_plots() rejoue ce calcul a chaque generation.
 
 # grille de sortie du son, percee dans le capot (le HP est dans le compartiment
 # arriere : sans elle il rayonnerait dans un volume clos et serait etouffe)

@@ -62,6 +62,35 @@ def edges_after_float32(ob):
     return int((counts != 2).sum()), int((~keep).sum())
 
 
+def composants_connexes(ob):
+    """Nombre de morceaux indépendants du maillage.
+
+    Contrôle indispensable, et longtemps absent : un plot qui ne touche aucune
+    paroi reste un solide PARFAITEMENT ÉTANCHE, donc `is_watertight` le déclare
+    bon. À l'impression il sort en pièce détachée. C'est ce qui est arrivé aux
+    4 plots de vis du capot, flottant à 5.9 mm de la paroi.
+    """
+    bm = _bm(ob)
+    vus = set()
+    n = 0
+    for v in bm.verts:
+        if v.index in vus:
+            continue
+        n += 1
+        pile = [v]
+        while pile:
+            w = pile.pop()
+            if w.index in vus:
+                continue
+            vus.add(w.index)
+            for e in w.link_edges:
+                o = e.other_vert(w)
+                if o.index not in vus:
+                    pile.append(o)
+    bm.free()
+    return n
+
+
 def volume_mm3(ob):
     """Volume signe (mm3) par decomposition tetraedrique."""
     V, F = verts_faces(ob)
@@ -147,14 +176,17 @@ def report(ob, label=""):
     """Bilan complet imprime sur stdout."""
     wt, nbad = is_watertight(ob)
     nfloat, ndegen = edges_after_float32(ob)
+    ncomp = composants_connexes(ob)
     vol = volume_mm3(ob)
     ext = extents(ob)
 
     print(f"--- controle {label or ob.name}")
     print(f"    etanche          : {wt}" + ("" if wt else f"  ({nbad} aretes != 2)"))
+    print(f"    composants       : {ncomp}"
+          + ("" if ncomp == 1 else "  <-- PIECES DETACHEES !"))
     print(f"    apres float32    : {nfloat} aretes != 2, {ndegen} faces degenerees")
     print(f"    encombrement     : {np.round(ext, 2)} mm")
     print(f"    volume           : {vol / 1000:.1f} cm3  ->  "
           f"{vol / 1000 * 1.24:.1f} g PETG")
     return {"watertight": wt, "bad_edges": nbad, "float32_bad": nfloat,
-            "volume_mm3": vol, "extents": ext}
+            "composants": ncomp, "volume_mm3": vol, "extents": ext}
