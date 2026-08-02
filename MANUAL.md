@@ -138,22 +138,54 @@ they would be unreachable.
 1. **Board into the front pocket**, screen facing out. Its four rear bosses drop
    onto the four posts standing on the divider; the board should sit flush with
    the front face. If the screen stands proud, stop and read the note below.
+   **Rotate the board 180°** if you printed the `_ecran180` files — see
+   *Screen orientation* below.
 2. **Fit the 4 original screws** through the wells, working from the open back.
    The heads seat in the Ø6 mm counterbores. **Do not over-tighten** — the well
    floor is 1 mm.
 3. **Speaker and battery** into the rear compartment (31 mm deep), fixed with
    foam tape. Pass their plugs through the **divider slot** (50 × 12 mm) and
    connect them to `Speak` and `BAT`.
-4. **Thread the USB-C cable** through the straight passage (20 × 32 mm) that
+4. **Thread the USB-C cable** through the straight passage (20 × 31 mm) that
    crosses the divider and the cover, and plug it into the board's rear-facing
    connector.
 5. **Close with the cover**, 4 × M3. Its lip centres it; the grille goes at the
    bottom, over the speaker.
 
+### Screen orientation
+
+Mounted the original way round, the display comes out **upside down**. The fix is
+mechanical: turn the board 180° in its pocket. Nothing else moves — the 4 screws
+sit at (±`HOLE_DX`/2, ±`HOLE_DY`/2) and the pocket is centred, so both are
+invariant under that rotation. Touch follows the screen on its own, because its
+mapping is board-relative; no firmware change.
+
+The one thing that does move is the USB-C passage, which is why there are two
+sets of files:
+
+```
+blender --background --python case/build_v1xl_blender.py -- --ecran180
+```
+
+| Files | Board | Screen |
+|---|---|---|
+| `boitier_xl_*_ecran180.stl` | turned 180° | upright |
+| `boitier_xl_*.stl` | original way round | upside down |
+
+Take the body **and** the cover from the same set: the passage crosses both
+pieces in a straight line, and mixing sets blocks it.
+
+The passage only mirrors in **x**, not in x and y. It is heavily oversized
+(20 × 31 mm for an 11 × 5.2 mm connector), so at y = +4 it still clears the
+rotated connector by 4.3 mm; dropping it to y = −4 would bite into the lower
+cover screw's counterbore. `verifier_passage_usb()` and `verifier_interferences()`
+check both of these on every build.
+
 > ⚠️ **If the screen stands proud of the front face**, the board's rear bosses
-> are taller than the 12 mm this model assumes. Measure them with calipers, set
-> `BOSS_H` in `case/bcc/params.py`, and regenerate — the screen position follows
-> that single value.
+> are taller than the 9 mm this model assumes. The first print used 12 mm — the
+> caliper reading was the boss *maximum*, not the seating height, and the screen
+> sat 3 mm too deep. Measure, set `BOSS_H` in `case/bcc/params.py`, and
+> regenerate — the screen position follows that single value, 1 mm for 1 mm.
 
 ![XL exploded](images/preview_xl_eclate.png)
 ![XL interior](images/preview_xl_interieur.png)
@@ -232,8 +264,10 @@ they would be unreachable.
 | Board doesn't seat fully | Check for filament blobs in the pocket corners; the pocket has +0.3 mm/side clearance |
 | Original screw feels too short | Well floor is 1 mm by design; use an M2.5/M3 screw 2–3 mm longer |
 | Screw holes don't line up | Pattern is 84.5 × 52.0 mm measured from photos — verify yours with calipers and adjust `HOLE_DX`/`HOLE_DY` in the build script |
-| Screen stands proud of the front face (XL) | The board's rear bosses are taller than the assumed 12 mm — measure and set `BOSS_H` in `case/bcc/params.py`, then regenerate |
-| USB cable won't reach the connector (XL) | The passage is 20 × 32 mm and deliberately oversized; if the connector still misses it, adjust `USB_PASS_X`/`USB_PASS_Y` |
+| Screen stands proud of the front face (XL) | The board's rear bosses are taller than the assumed 9 mm — measure and set `BOSS_H` in `case/bcc/params.py`, then regenerate |
+| Screen is upside down (XL) | Turn the board 180° in its pocket and print the `_ecran180` files — see *Screen orientation* |
+| USB passage is blocked (XL) | Body and cover come from different sets — both must be `_ecran180`, or neither |
+| USB cable won't reach the connector (XL) | The passage is 20 × 31 mm and deliberately oversized; if the connector still misses it, adjust `USB_PASS_X`/`USB_PASS_Y` |
 | Rear cover won't seat (XL) | The lip has 0.35 mm clearance per side — clear any elephant foot on the body's rear rim |
 | USB plug doesn't fit (v1) | Side cutout is 11 × 5.2 mm; use a slim plug or slightly enlarge `USB_W`/`USB_H` |
 | Case rocks (v1) | Base is stability-checked; ensure the bottom face printed flat (no elephant foot) — sand lightly if needed |

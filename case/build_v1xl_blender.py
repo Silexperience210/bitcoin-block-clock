@@ -33,14 +33,16 @@ import bpy  # noqa: E402
 from mathutils import Matrix  # noqa: E402
 
 from bcc import build, validate  # noqa: E402
-from bcc.params import (BATT_L, BATT_T, BATT_W_, BOARD_H, BOARD_W, BOSS_BORE_T,  # noqa: E402
+from bcc.params import (BATT_L, BATT_T, BATT_W_, BOARD_H, BOARD_W,  # noqa: E402
+                        BOSS_BORE_T, BOSS_H,
                         CAP_BOSS_D, CAP_BOSS_INSET, CAP_LIP_CLEAR, CAP_LIP_T,
                         CAP_SCREW_CLEAR, CAP_SCREW_D, CAP_SCREW_HEAD, CAP_T,
                         DIVIDER_T, GRILLE_LEN, GRILLE_SLOTS, GRILLE_SLOT_W,
                         GRILLE_STEP, HEAD_D, HOLES, OUT_H, OUT_R, OUT_W,
                         POCKET_CLEAR, POCKET_DEPTH, POCKET_RELIEF, POST_D,
                         SCREW_CLEAR_D, SPK_D, SPK_T, TILT_DEG, USB_PASS_H,
-                        USB_PASS_W, USB_PASS_X, USB_PASS_Y, V1XL_BACK_S,
+                        USB_PASS_W, USB_PASS_X, USB_PASS_Y, USB_H, USB_W,
+                        USB_Y, V1XL_BACK_S,
                         V1XL_RIM_T, V1XL_T_END,
                         WALL, WELL_FLOOR, WIRE_SLOT_H, WIRE_SLOT_W)
 from bcc.profiles import circle_pts, resample_closed, rrect_pts  # noqa: E402
@@ -58,6 +60,137 @@ BORE_FLOOR = -POCKET_DEPTH - BOSS_BORE_T    # appui des bossages : z = -16.2
 CAP_BOSSES = [(sx * (OUT_W / 2 - CAP_BOSS_INSET),
                sy * (OUT_H / 2 - CAP_BOSS_INSET))
               for sx in (1, -1) for sy in (1, -1)]
+
+# ------------------------------------------------------- orientation ecran
+# L'ecran du JC3248W535 sort a l'envers dans le sens de montage d'origine. On le
+# remet a l'endroit en tournant la carte de 180 deg dans sa poche, ce que la
+# mecanique autorise sans rien changer d'autre : les 4 vis sont a
+# (+-HOLE_DX/2, +-HOLE_DY/2), donc invariantes par cette rotation, et la poche
+# est centree. Seul le passage USB-C suit la carte.
+#
+# La rotation envoie le connecteur de (USB_PASS_X, USB_Y) a (-USB_PASS_X,
+# -USB_Y), mais le passage, lui, ne bouge QU'EN X. Deux raisons :
+#   - il est tres surdimensionne (20 x 31 pour un connecteur de 11 x 5.2) et
+#     couvre deja largement y = -USB_Y ; verifier_passage_usb() le prouve au
+#     lieu de le supposer.
+#   - le descendre a y = -4 le ferait mordre la fraisure de la vis basse du
+#     capot (sommet a -12.5) : c'est la contrainte qui avait deja fixe
+#     USB_PASS_H a 31. Le premier essai en (x,y) -> (-x,-y) s'est fait
+#     rejeter par verifier_interferences() sur exactement cette paire.
+# Pilote par --ecran180 ; USB_PX / USB_PY sont fixes par _orienter().
+USB_PX, USB_PY = USB_PASS_X, USB_PASS_Y
+ECRAN180 = False
+
+
+def _orienter(retourne):
+    """Place le passage USB-C selon le sens de montage de la carte."""
+    global USB_PX, USB_PY, ECRAN180
+    ECRAN180 = bool(retourne)
+    USB_PX = -USB_PASS_X if ECRAN180 else USB_PASS_X
+    USB_PY = USB_PASS_Y
+    print(f"--- orientation carte : "
+          f"{'180 deg (ecran retourne)' if ECRAN180 else 'origine'}"
+          f" -> passage USB-C a ({USB_PX:+.2f}, {USB_PY:+.2f})")
+
+
+def verifier_passage_usb():
+    """Controle que le passage couvre bien le connecteur, carte tournee ou non.
+
+    Sans ce controle, mirroir-en-x-seulement ne serait qu'une intuition : rien
+    ne garantirait que le connecteur, qui descend a -USB_Y quand la carte
+    tourne, reste dans une lumiere centree sur +USB_PASS_Y.
+    """
+    cx = -USB_PASS_X if ECRAN180 else USB_PASS_X
+    cy = -USB_Y if ECRAN180 else USB_Y
+    marges = {
+        "gauche": (cx - USB_W / 2) - (USB_PX - USB_PASS_W / 2),
+        "droite": (USB_PX + USB_PASS_W / 2) - (cx + USB_W / 2),
+        "bas": (cy - USB_H / 2) - (USB_PY - USB_PASS_H / 2),
+        "haut": (USB_PY + USB_PASS_H / 2) - (cy + USB_H / 2),
+    }
+    pire = min(marges.values())
+    etat = "OK" if pire >= 1.0 else ("JUSTE" if pire > 0 else "HORS LUMIERE")
+    detail = "  ".join(f"{k} {v:+.1f}" for k, v in marges.items())
+    print(f"--- connecteur ({cx:+.2f}, {cy:+.2f}) dans le passage : "
+          f"marge {pire:+.1f} mm  {etat}")
+    print(f"      {detail}")
+    return pire
+
+
+def verifier_levre_plots():
+    """Contrôle que la lèvre du capot passe entre les plots de vis du corps.
+
+    Ce contrôle existe parce que l'oubli a coûté un tirage : les plots étaient
+    placés à 10 mm du bord, la lèvre les heurtait de 2.11 mm, et le capot ne
+    rentrait tout simplement pas. Rien dans le maillage ne le signalait — les
+    deux pièces étaient parfaitement étanches chacune de son côté.
+    """
+    lev_int = _contour(WALL + CAP_LIP_CLEAR + 2.0)
+    r = CAP_BOSS_D / 2.0
+    marges = [float(np.min(np.hypot(lev_int[:, 0] - bx, lev_int[:, 1] - by))) - r
+              for bx, by in CAP_BOSSES]
+    pire = min(marges)
+    etat = "OK" if pire >= 1.0 else ("JUSTE" if pire > 0 else "COLLISION")
+    print(f"--- levre du capot vs plots de vis : marge {pire:+.2f} mm  {etat}")
+    return pire
+
+
+def verifier_interferences():
+    """Contrôle que les percages d'une même pièce ne se recoupent pas.
+
+    Les deux défauts du premier tirage venaient de là, et aucun contrôle de
+    maillage ne pouvait les voir : chaque pièce était parfaitement étanche,
+    mais leurs percages se chevauchaient. On raisonne sur les rectangles
+    englobants dans le plan de chaque pièce, en tenant compte du cisaillement
+    (le contour se décale en y quand on avance le long de t).
+    """
+    dec_capot = V1XL_T_END * np.sin(TILT)
+    dec_cloison = DIV_T * np.sin(TILT)
+
+    def rect(cx, cy, w, h):
+        return (cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2)
+
+    def chevauche(a, b):
+        return not (a[1] <= b[0] or b[1] <= a[0] or a[3] <= b[2] or b[3] <= a[2])
+
+    usb = rect(USB_PX, USB_PY, USB_PASS_W, USB_PASS_H)
+    grille = rect(0, dec_capot, GRILLE_LEN,
+                  (GRILLE_SLOTS - 1) * GRILLE_STEP + GRILLE_SLOT_W)
+    fente = rect(0, dec_cloison - OUT_H / 2 + WIRE_SLOT_H + WALL,
+                 WIRE_SLOT_W, WIRE_SLOT_H)
+
+    paires = []
+    for bx, by in CAP_BOSSES:                       # dans le capot
+        fr = rect(bx, by + dec_capot, CAP_SCREW_HEAD, CAP_SCREW_HEAD)
+        paires.append((f"vis capot ({bx:+.0f},{by + dec_capot:+.1f}) / USB", usb, fr))
+        paires.append((f"vis capot ({bx:+.0f},{by + dec_capot:+.1f}) / grille",
+                       grille, fr))
+    paires.append(("grille / USB", grille, usb))
+    paires.append(("fente à fils / USB", fente, usb))
+    for hx, hy in HOLES:                            # dans la cloison
+        pl = rect(hx, hy, POST_D, POST_D)
+        paires.append((f"plot carte ({hx:+.0f},{hy:+.0f}) / USB", usb, pl))
+        paires.append((f"plot carte ({hx:+.0f},{hy:+.0f}) / fente", fente, pl))
+
+    fautes = [nom for nom, a, b in paires if chevauche(a, b)]
+    if fautes:
+        print("--- interférences : " + str(len(fautes)) + " COLLISION(S)")
+        for f in fautes:
+            print(f"      {f}")
+    else:
+        print(f"--- interférences : aucune ({len(paires)} paires vérifiées)")
+    return fautes
+
+
+def verifier_ecran():
+    """Position de la face avant de l'écran une fois la carte posée."""
+    dos = -POCKET_DEPTH - BOSS_BORE_T + BOSS_H     # plan du capot de la carte
+    ecran = dos + POCKET_DEPTH
+    etat = "affleurant" if abs(ecran) < 0.3 else (
+        f"{-ecran:+.1f} mm (négatif = enfoncé)")
+    print(f"--- écran : plots à {-POCKET_DEPTH - BOSS_BORE_T:.1f}, "
+          f"face avant à {ecran:+.1f} -> {etat}")
+    return ecran
 
 
 def _at(t):
@@ -286,7 +419,7 @@ def build_corps(motif=False):
                       WIRE_SLOT_W, WIRE_SLOT_H, DIVIDER_T + 4, "fente")
     # passage du cable USB-C : le connecteur est a l'equerre, ouverture vers
     # l'arriere, donc le cable traverse la cloison puis le capot en ligne droite
-    usb_pass = build.box(USB_PASS_X, USB_PASS_Y, org[2] - DIVIDER_T / 2,
+    usb_pass = build.box(USB_PX, USB_PY, org[2] - DIVIDER_T / 2,
                          USB_PASS_W, USB_PASS_H, DIVIDER_T + 4, "usbpass")
     cloison = build.difference(cloison, [fente, usb_pass])
     corps = build.union(corps, cloison)
@@ -310,11 +443,30 @@ def build_corps(motif=False):
     # --- plots taraudes recevant les vis du capot
     back = _at(V1XL_T_END)
     boss_len = 16.0
+    t_boss = V1XL_T_END - boss_len / np.cos(TILT)
+    t_web_fin = V1XL_T_END - CAP_LIP_T - 1.0     # s'arrete avant la levre
     bosses, pilots = [], []
     for i, (bx, by) in enumerate(CAP_BOSSES):
         y = by + back[1]
         bosses.append(build.cylz(CAP_BOSS_D / 2, back[2] + boss_len, back[2],
                                  bx, y, name=f"cboss{i}"))
+
+        # Nervure rattachant le plot a la paroi. SANS ELLE LE PLOT FLOTTE : a
+        # 14 mm du bord il ne touche plus rien, et rien ne le signale — un
+        # cylindre isole dans une coque reste un maillage parfaitement etanche.
+        # Elle s'arrete avant la levre du capot pour ne pas la gener.
+        cc = np.array([np.sign(bx) * (OUT_W / 2 - OUT_R),
+                       np.sign(by) * (OUT_H / 2 - OUT_R)])
+        d = np.array([bx, by]) - cc
+        d /= np.linalg.norm(d)
+        p_paroi = cc + d * (OUT_R - WALL / 2)     # milieu de l'epaisseur
+        milieu = (np.array([bx, by]) + p_paroi) / 2.0
+        longueur = float(np.linalg.norm(p_paroi - np.array([bx, by]))) + CAP_BOSS_D
+        base = rrect_pts(longueur, 5.0, 2.0)
+        base = base @ np.array([[d[0], d[1]], [-d[1], d[0]]])
+        bosses.append(_prism_seg(base + milieu, t_boss, t_web_fin,
+                                 f"cweb{i}", n=3))
+
         pilots.append(build.cylz(CAP_SCREW_D / 2, back[2] + boss_len - 1.5,
                                  back[2] - 1.0, bx, y, name=f"cpil{i}"))
     corps = build.union(corps, bosses)
@@ -359,7 +511,7 @@ def build_capot():
     capot = build.difference(capot, fentes)
 
     # --- passage du cable USB-C, aligne sur celui de la cloison
-    usb_pass = build.box(USB_PASS_X, USB_PASS_Y, back[2] - CAP_T / 2,
+    usb_pass = build.box(USB_PX, USB_PY, back[2] - CAP_T / 2,
                          USB_PASS_W, USB_PASS_H, CAP_T + CAP_LIP_T + 4,
                          "usbpass")
     capot = build.difference(capot, usb_pass)
@@ -381,10 +533,17 @@ def build_capot():
 
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    # avant tout controle : la position du passage USB-C en depend
+    _orienter("--ecran180" in argv)
+    verifier_ecran()
+    verifier_levre_plots()
+    verifier_passage_usb()
+    verifier_interferences()
     motif = ("cannelures" if "--motif" in argv
              else "blocs" if "--blocs" in argv
              else "genesis" if "--genesis" in argv else None)
-    suf = f"_{motif}" if motif else ""
+    rot = "_ecran180" if ECRAN180 else ""
+    suf = (f"_{motif}" if motif else "") + rot
     corps = build_corps(motif)
 
     dispo = V1XL_T_END - DIV_T - CAP_LIP_T
@@ -409,15 +568,16 @@ def main():
 
     capot = build_capot()
     build.export_stl(capot, os.path.join(
-        HERE, "boitier_xl_capot_display_orientation.stl"))
+        HERE, f"boitier_xl_capot{rot}_display_orientation.stl"))
     # le capot s'imprime A PLAT (face exterieure sur le plateau), pas dans
     # l'orientation du corps : ses faces sont deja perpendiculaires a z
     build.apply_transform(capot, Matrix.Rotation(np.pi, 4, 'X'))
     build.drop_to_bed(capot)
     print(f"    capot sur plateau : {np.round(validate.extents(capot), 1)} mm")
-    build.export_stl(capot, os.path.join(HERE, "boitier_xl_capot.stl"))
+    build.export_stl(capot, os.path.join(HERE, f"boitier_xl_capot{rot}.stl"))
 
-    print("ecrits : boitier_xl_corps.stl, boitier_xl_capot.stl (+ orientations ecran)")
+    print(f"ecrits : boitier_xl_corps{suf}.stl, boitier_xl_capot{rot}.stl "
+          f"(+ orientations ecran)")
 
 
 if __name__ == "__main__":

@@ -80,9 +80,9 @@ zero repair in the slicer.
 
 ### XL — why two pieces
 
-The board's rear cover carries **four 12 mm bosses** at the screw corners. A case
+The board's rear cover carries **four 9 mm bosses** at the screw corners. A case
 that assumes a flat back leaves the board resting on them, pushing the screen
-12 mm proud of the front face — the XL gives them four seats at the right depth.
+9 mm proud of the front face — the XL gives them four seats at the right depth.
 
 Its body is an **oblique prism**: the profile slides along the tilt axis, so the
 underside stays flat over the whole depth. A pebble deeper than ~35 mm cannot
@@ -92,6 +92,11 @@ It splits in two because the **4 original screws go in from behind**. Sealed in 
 one-piece shell they would be unreachable; the open back makes them accessible,
 then the cover closes it. The USB-C connector is a right-angle part facing
 rearward, so the cable enters through a straight passage in the divider and cover.
+
+Mounted the original way round the display comes out upside down, so the board is
+turned 180° in its pocket — the screw pattern is symmetric, so only the USB-C
+passage follows. Build those files with `-- --ecran180`; they are suffixed
+`_ecran180`, and body and cover must come from the same set.
 
 **Assembly**: board into the front pocket → 4 original screws from the open back
 → speaker and battery in the rear compartment, wires through the divider slot →
