@@ -9,12 +9,19 @@ Designed by **silexperience**.
 
 ## 1. What you need
 
-### Common to both versions
+### Common to every version
 
 - The **Guition JC3248W535** board with its **4 original corner screws**
 - A 3D printer, PLA or PETG filament
 - USB-C cable (power / programming)
 - Small Phillips screwdriver
+
+### Version XL (recommended) additionally
+
+- Small speaker (8 Ω, JST 1.25 mm 2-pin — the board has a `Speak` connector)
+- LiPo battery up to **2000 mAh**, JST 1.25 mm 2-pin (`BAT` connector)
+- **4× M3 × 8–10 mm self-tapping screws** (rear cover ↔ body)
+- Foam double-sided tape (to secure speaker and battery)
 
 ### Version 2 (deep) additionally
 
@@ -58,6 +65,41 @@ arduino-cli upload --fqbn "esp32:esp32:esp32s3" -p COM42 .
 
 ## 3. Printing
 
+### Version XL — body + rear cover (recommended)
+
+Print **one** body finish plus the cover.
+
+| Body finish | File | Material |
+|---|---|---|
+| Smooth | `case/boitier_xl_corps.stl` | 64.1 cm³ |
+| Longitudinal flutes | `case/boitier_xl_corps_cannelures.stl` | 62.4 cm³ |
+| Staggered blocks | `case/boitier_xl_corps_blocs.stl` | 61.2 cm³ |
+| **Genesis block hash** | `case/boitier_xl_corps_genesis.stl` | 67.7 cm³ |
+
+| Setting | Body | Rear cover |
+|---|---|---|
+| File | one of the four above | `case/boitier_xl_capot.stl` |
+| Orientation | As supplied — **flat underside on the bed** | As supplied — flat |
+| Supports | **None** | **None** |
+| Bed footprint | 116 × 71.8 × 80.2 mm | 116 × 82 × 6.9 mm |
+| Walls | 3–4 perimeters | 3–4 perimeters |
+| Infill | 20–25 % | 25–30 % (it carries the screws) |
+| Layer height | 0.2 mm | 0.2 mm |
+
+> 💡 The genesis finish is **in relief**, so it adds 2.7 mm to the overall width
+> (118.7 mm instead of 116). Its pads are 1.2 mm proud — below 0.2 mm layers the
+> pattern loses definition; raise `relief` in `_hash_relief()` if it prints soft.
+
+> The body's divider prints **vertically** in this orientation, which is exactly
+> why no supports are needed. Do not re-orient it in the slicer.
+
+Regenerate any variant in about 30 seconds:
+
+```bash
+blender --background --python case/build_v1xl_blender.py            # smooth
+blender --background --python case/build_v1xl_blender.py -- --genesis
+```
+
 ### Version 1 — compact (`case/boitier_bitcoinclock.stl`)
 
 | Setting | Value |
@@ -87,7 +129,70 @@ with **zero repair**.
 
 ---
 
-## 4. Assembly — Version 1
+## 4. Assembly — Version XL
+
+The whole design follows from one fact: **the 4 original screws go in from
+behind**. That is why the body is open at the back — sealed in a single piece
+they would be unreachable.
+
+1. **Board into the front pocket**, screen facing out. Its four rear bosses drop
+   onto the four posts standing on the divider; the board should sit flush with
+   the front face. If the screen stands proud, stop and read the note below.
+   **Rotate the board 180°** if you printed the `_ecran180` files — see
+   *Screen orientation* below.
+2. **Fit the 4 original screws** through the wells, working from the open back.
+   The heads seat in the Ø6 mm counterbores. **Do not over-tighten** — the well
+   floor is 1 mm.
+3. **Speaker and battery** into the rear compartment (31 mm deep), fixed with
+   foam tape. Pass their plugs through the **divider slot** (50 × 12 mm) and
+   connect them to `Speak` and `BAT`.
+4. **Thread the USB-C cable** through the straight passage (20 × 31 mm) that
+   crosses the divider and the cover, and plug it into the board's rear-facing
+   connector.
+5. **Close with the cover**, 4 × M3. Its lip centres it; the grille goes at the
+   bottom, over the speaker.
+
+### Screen orientation
+
+Mounted the original way round, the display comes out **upside down**. The fix is
+mechanical: turn the board 180° in its pocket. Nothing else moves — the 4 screws
+sit at (±`HOLE_DX`/2, ±`HOLE_DY`/2) and the pocket is centred, so both are
+invariant under that rotation. Touch follows the screen on its own, because its
+mapping is board-relative; no firmware change.
+
+The one thing that does move is the USB-C passage, which is why there are two
+sets of files:
+
+```
+blender --background --python case/build_v1xl_blender.py -- --ecran180
+```
+
+| Files | Board | Screen |
+|---|---|---|
+| `boitier_xl_*_ecran180.stl` | turned 180° | upright |
+| `boitier_xl_*.stl` | original way round | upside down |
+
+Take the body **and** the cover from the same set: the passage crosses both
+pieces in a straight line, and mixing sets blocks it.
+
+The passage only mirrors in **x**, not in x and y. It is heavily oversized
+(20 × 31 mm for an 11 × 5.2 mm connector), so at y = +4 it still clears the
+rotated connector by 4.3 mm; dropping it to y = −4 would bite into the lower
+cover screw's counterbore. `verifier_passage_usb()` and `verifier_interferences()`
+check both of these on every build.
+
+> ⚠️ **If the screen stands proud of the front face**, the board's rear bosses
+> are taller than the 9 mm this model assumes. The first print used 12 mm — the
+> caliper reading was the boss *maximum*, not the seating height, and the screen
+> sat 3 mm too deep. Measure, set `BOSS_H` in `case/bcc/params.py`, and
+> regenerate — the screen position follows that single value, 1 mm for 1 mm.
+
+![XL exploded](images/preview_xl_eclate.png)
+![XL interior](images/preview_xl_interieur.png)
+
+---
+
+## 5. Assembly — Version 1
 
 1. Unscrew the 4 corner screws of the board (one at a time, hold the screen).
 2. Seat the board in the front pocket, **screen facing out**, USB-C on the
@@ -97,11 +202,16 @@ with **zero repair**.
    If a screw feels too short, replace it with an M2.5/M3 screw 2–3 mm longer.
 4. Plug USB-C through the side cutout.
 
+> ⚠️ **Two known defects in v1 — prefer the XL.** This version assumes a flat
+> board back, so the rear bosses hold the board up and the screen stands ~12 mm
+> proud of the front face. Its USB-C cutout is on the side, whereas the board's
+> connector is a right-angle part facing rearward. Both are fixed in the XL.
+
 ![v1 posed](images/preview_pose.png)
 
 ---
 
-## 5. Assembly — Version 2 (deep)
+## 6. Assembly — Version 2 (deep)
 
 1. **Mount the board on the front frame** exactly as in v1 (steps 1–3 above).
    The screw wells are accessible from the rear of the frame while the shell
@@ -121,7 +231,7 @@ with **zero repair**.
 
 ---
 
-## 6. Using the clock
+## 7. Using the clock
 
 - **Power/charging:** plug USB-C on the left side. The board charges the
   battery automatically when present.
@@ -147,18 +257,23 @@ with **zero repair**.
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Problem | Fix |
 |---|---|
 | Board doesn't seat fully | Check for filament blobs in the pocket corners; the pocket has +0.3 mm/side clearance |
 | Original screw feels too short | Well floor is 1 mm by design; use an M2.5/M3 screw 2–3 mm longer |
 | Screw holes don't line up | Pattern is 84.5 × 52.0 mm measured from photos — verify yours with calipers and adjust `HOLE_DX`/`HOLE_DY` in the build script |
-| USB plug doesn't fit | Cutout is 11 × 5.2 mm; use a slim plug or slightly enlarge `USB_W`/`USB_H` |
+| Screen stands proud of the front face (XL) | The board's rear bosses are taller than the assumed 9 mm — measure and set `BOSS_H` in `case/bcc/params.py`, then regenerate |
+| Screen is upside down (XL) | Turn the board 180° in its pocket and print the `_ecran180` files — see *Screen orientation* |
+| USB passage is blocked (XL) | Body and cover come from different sets — both must be `_ecran180`, or neither |
+| USB cable won't reach the connector (XL) | The passage is 20 × 31 mm and deliberately oversized; if the connector still misses it, adjust `USB_PASS_X`/`USB_PASS_Y` |
+| Rear cover won't seat (XL) | The lip has 0.35 mm clearance per side — clear any elephant foot on the body's rear rim |
+| USB plug doesn't fit (v1) | Side cutout is 11 × 5.2 mm; use a slim plug or slightly enlarge `USB_W`/`USB_H` |
 | Case rocks (v1) | Base is stability-checked; ensure the bottom face printed flat (no elephant foot) — sand lightly if needed |
-| Speaker sounds muffled (v2) | Make sure it sits against the grille slots, not against a solid wall |
+| Speaker sounds muffled | Make sure it sits against the grille slots, not against a solid wall |
 
-## 8. Care
+## 9. Care
 
 - Keep away from heat sources (>60 °C softens PLA).
 - If the battery is installed, charge at least every few months.
