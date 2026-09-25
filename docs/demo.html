@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitcoin Block Clock — V5.2 walkthrough</title>
+<meta name="description" content="One minute through the Bitcoin Block Clock V5.2: the live mempool block strip, the 7-day Pools war, and the honest numbers behind every prediction.">
+<meta name="theme-color" content="#0B0B0F">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0B0B0F; --panel:#15151B; --panel2:#1B1B22; --line:#26262E;
+  --ink:#E8E4DA; --dim:#8A8A94; --faint:#55555E;
+  --btc:#F7931A; --btc-deep:#B8650A; --red:#C63A2F; --green:#3FBF6F;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 "IBM Plex Sans",system-ui,sans-serif;
+  overflow-x:hidden;-webkit-font-smoothing:antialiased}
+::selection{background:var(--btc);color:#000}
+a{color:inherit}
+
+/* ---------- top status bar (mirrors the device header) ---------- */
+.statusbar{display:flex;justify-content:space-between;align-items:center;gap:16px;
+  padding:10px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap;
+  font:500 12px/1 "IBM Plex Mono",monospace;letter-spacing:.12em;color:var(--dim)}
+.statusbar b{color:var(--btc);font-weight:500}
+.statusbar a{color:var(--dim);text-decoration:none;transition:color .15s}
+.statusbar a:hover{color:var(--btc)}
+.statusbar .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--green);margin-right:8px;animation:pulse 2.2s infinite;vertical-align:middle}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ---------- hero head ---------- */
+.wrap{max-width:1120px;margin:0 auto;padding:54px 24px 26px}
+.eyebrow{font:600 12px/1 "Rajdhani",sans-serif;letter-spacing:.34em;color:var(--btc);
+  text-transform:uppercase;margin-bottom:16px}
+h1{font:700 clamp(38px,5.4vw,62px)/0.98 "Rajdhani",sans-serif;text-transform:uppercase;letter-spacing:.01em}
+h1 .stroke{color:transparent;-webkit-text-stroke:1.5px var(--btc)}
+p.lead{margin:20px 0 0;color:var(--dim);max-width:64ch;font-size:17px}
+p.lead strong{color:var(--ink);font-weight:500}
+
+/* ---------- player ---------- */
+.player{margin:38px 0 0;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;overflow:hidden;
+  box-shadow:0 30px 80px -34px rgba(0,0,0,.95), inset 0 1px 0 rgba(255,255,255,.04)}
+.player video{display:block;width:100%;aspect-ratio:16/9;background:#000}
+.player .bar{display:flex;justify-content:space-between;align-items:center;gap:12px;
+  padding:12px 16px;border-top:1px solid var(--line);flex-wrap:wrap;
+  font:500 11px/1 "IBM Plex Mono",monospace;letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
+.player .bar .len{color:var(--btc)}
+
+/* ---------- chapters ---------- */
+.chapters{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
+.chapters button{cursor:pointer;background:var(--panel2);color:var(--dim);
+  border:1px solid var(--line);border-radius:999px;padding:9px 15px;
+  font:500 12px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;
+  transition:all .15s ease}
+.chapters button:hover{color:var(--ink);border-color:var(--btc);transform:translateY(-1px)}
+.chapters button.on{background:var(--btc);color:#0B0B0F;border-color:var(--btc);font-weight:500}
+.chapters button i{font-style:normal;color:var(--faint);margin-right:8px}
+.chapters button.on i{color:rgba(11,11,15,.55)}
+
+/* ---------- two columns ---------- */
+.cols{display:grid;grid-template-columns:1.15fr .85fr;gap:46px;margin:44px 0 0;
+  padding-top:34px;border-top:1px solid var(--line)}
+.cols h2{font:700 22px/1.1 "Rajdhani",sans-serif;text-transform:uppercase;letter-spacing:.1em;
+  margin-bottom:18px}
+.cols h2 span{color:var(--btc)}
+.cols ul{list-style:none;color:var(--dim);font-size:15.5px}
+.cols ul li{position:relative;padding-left:22px;margin-bottom:12px}
+.cols ul li::before{content:"";position:absolute;left:2px;top:9px;width:7px;height:7px;
+  background:var(--btc);border-radius:1px}
+.cols ul strong{color:var(--ink);font-weight:500}
+.cols .glance ul li{margin-bottom:9px;font-size:15px}
+.cols .glance{margin-bottom:26px}
+.note{font:400 13px/1.75 "IBM Plex Mono",monospace;color:var(--dim);margin-bottom:20px}
+
+.btn{display:inline-flex;align-items:center;gap:12px;text-decoration:none;cursor:pointer;
+  background:var(--btc);color:#0B0B0F;border:0;border-radius:2px;
+  font:700 17px/1 "Rajdhani",sans-serif;letter-spacing:.16em;text-transform:uppercase;
+  padding:17px 30px;box-shadow:0 0 0 1px var(--btc-deep), 0 12px 34px -14px rgba(247,147,26,.6);
+  transition:transform .15s ease, box-shadow .15s ease;margin-bottom:12px}
+.btn:hover{transform:translateY(-2px);box-shadow:0 0 0 1px var(--btc), 0 16px 40px -14px rgba(247,147,26,.8)}
+.btn.ghost{background:transparent;color:var(--dim);box-shadow:0 0 0 1px var(--line)}
+.btn.ghost:hover{color:var(--ink);box-shadow:0 0 0 1px var(--btc)}
+.btn .chev{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:14px}
+
+footer{border-top:1px solid var(--line);margin-top:56px;padding:26px 24px;display:flex;
+  justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;
+  font:500 12px/1.6 "IBM Plex Mono",monospace;letter-spacing:.1em;color:var(--dim)}
+footer a{color:var(--dim);text-decoration:none}
+footer a:hover{color:var(--btc)}
+
+@media (max-width:820px){
+  .cols{grid-template-columns:1fr;gap:30px}
+  .wrap{padding:36px 18px 20px}
+  footer{flex-direction:column;align-items:flex-start}
+  .chapters button{max-width:100%;white-space:normal;text-align:left;line-height:1.35}
+  .btn{width:100%;justify-content:center}
+}
+</style>
+</head>
+<body>
+
+<div class="statusbar">
+  <span><span class="dot"></span>V5.2 WALKTHROUGH</span>
+  <span><b>1:02</b> · every page, in motion</span>
+  <span><a href="index.html">← Web flasher</a></span>
+</div>
+
+<div class="wrap">
+
+  <div class="eyebrow">V5.2 · watch it run</div>
+  <h1>Every screen<br><span class="stroke">is alive</span></h1>
+  <p class="lead">One minute through the clock, in order: the mempool <strong>block strip</strong> filling like a
+  liquid, the 7-day <strong>Pools war</strong> race, and the <strong>honest numbers</strong> that replaced the old
+  countdown. Real frames from the firmware's own drawing code.</p>
+
+  <div class="player">
+    <video id="v" controls playsinline preload="metadata" poster="media/bbl-demo-poster.jpg">
+      <source src="media/bbl-demo-v5.2.mp4" type="video/mp4">
+      Your browser cannot play this video — <a href="media/bbl-demo-v5.2.mp4">download it here</a>.
+    </video>
+    <div class="bar">
+      <span>Bitcoin Block Clock · V5.2</span>
+      <span><span class="len">6.5 MB</span> · 1280×720 · with sound</span>
+    </div>
+  </div>
+
+  <div class="chapters" id="ch">
+    <button data-t="0"><i>0:00</i>Intro</button>
+    <button data-t="20"><i>0:20</i>Block strip — live mempool</button>
+    <button data-t="30"><i>0:30</i>06 · Pools war</button>
+    <button data-t="40"><i>0:40</i>08 · Signals — honest numbers</button>
+    <button data-t="61"><i>1:01</i>End card</button>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h2>What you are <span>watching</span></h2>
+      <ul>
+        <li><strong>Block strip</strong> — the pending block fills like a liquid (waves, bubbles);
+            the last four blocks are coloured by median fee, and a mined block slides out of the
+            mempool into the chain.</li>
+        <li><strong>Pools war</strong> — the 7-day mining pool race, with medals, shine and count-up.</li>
+        <li><strong>Honest numbers</strong> — the block timer is memoryless (elapsed time, rarity,
+            median, 6-confirmation ETA), fee levels get their own ETA, and direction odds are shown
+            with independent samples and a 95 % interval — “no measurable edge” when it includes 50 %.</li>
+        <li><strong>Volatility cone</strong> — calibrated 50 %/80 % cone on the 7D/30D chart, with its
+            own on-device track record.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="glance">
+        <h2>At a <span>glance</span></h2>
+        <ul>
+          <li><strong>ESP32-S3</strong> · Guition JC3248W535 · 3.5″ touch display</li>
+          <li><strong>9 pages</strong>, 100 % responsive, drawn into PSRAM</li>
+          <li><strong>Open source</strong> · Arduino firmware · 3D-printed shell</li>
+        </ul>
+      </div>
+      <h2>Try it <span>yourself</span></h2>
+      <p class="note">One USB-C cable, no toolchain, no drivers. Chrome or Edge on the desktop.</p>
+      <a class="btn" href="index.html">Flash it <span class="chev">→</span></a><br>
+      <a class="btn ghost" href="https://github.com/Silexperience210/bitcoin-block-clock">Source on GitHub <span class="chev">→</span></a>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <span>Bitcoin Block Clock — open source, ESP32-S3, 3D-printed shell</span>
+  <span><a href="https://github.com/Silexperience210/bitcoin-block-clock">GitHub</a> ·
+        <a href="index.html">Web flasher</a></span>
+</footer>
+
+<script>
+  var v = document.getElementById('v');
+  var buttons = [].slice.call(document.querySelectorAll('#ch button'));
+
+  function active(btn){
+    buttons.forEach(function(b){ b.classList.remove('on'); });
+    if (btn) btn.classList.add('on');
+  }
+
+  buttons.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      v.currentTime = parseFloat(btn.dataset.t) || 0;
+      v.play();
+      active(btn);
+      try { v.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) { v.scrollIntoView(); }
+    });
+  });
+
+  // suit le chapitre en cours pendant la lecture
+  v.addEventListener('timeupdate', function(){
+    var t = v.currentTime, cur = null;
+    buttons.forEach(function(b){
+      if (t >= (parseFloat(b.dataset.t) || 0)) cur = b;
+    });
+    if (cur && cur !== v.__current) { v.__current = cur; active(cur); }
+  });
+</script>
+
+</body>
+</html>

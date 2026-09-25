@@ -18,11 +18,19 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/Silexperience210/bitcoin-block-clock?style=for-the-badge&logo=github&color=F7931A)](https://github.com/Silexperience210/bitcoin-block-clock/stargazers)
 
+### [⚡ Flash it in one click →](https://silexperience210.github.io/bitcoin-block-clock/)
+
+
 </div>
 
 ---
 
 ## 🎬 V5 — every screen is alive
+
+[![▶ Watch the 1-minute walkthrough — every page in motion](docs/media/bbl-promo.jpg)](https://silexperience210.github.io/bitcoin-block-clock/demo.html)
+
+**▶ [Watch the walkthrough (1:02, with sound)](https://silexperience210.github.io/bitcoin-block-clock/demo.html)** — the mempool block strip filling
+like a liquid, the 7-day Pools war, and the honest numbers behind every prediction.
 
 ![NEW BLOCK cinematic](images/new-block-cinematic.gif)
 
