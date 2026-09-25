@@ -1,5 +1,13 @@
 # PATCH SIGNAUX v2 — momentum & direction calibrés (vue large)
 
+> **Statut V5 : INTÉGRÉ.** `signals.h` est inclus dans le sketch (il ne l'était
+> pas en V4 : la page Signaux v2 n'était jamais compilée), `REQ_SIGNALS` +
+> fetch toutes les 4 h dans `netTask`, panneaux calibrés affichés. Correctifs
+> au passage : tableaux temporaires passés en `static` (≈9 Ko retirés de la
+> pile netTask), requête **HTTP/1.0** (pas de réponse chunked qui corromprait
+> le parseur streaming), mise en page des panneaux (les chiffres lissés
+> débordaient du panneau DIRECTION de 64 px), barre d'edge bornée à 40 px.
+
 ## Fichiers ajoutés
 - `firmware/bitcoin-block-clock/signals.h` — fetch Binance streaming + calcul TTM + panneaux UI
 - `firmware/bitcoin-block-clock/signals_calib.h` — tables de fréquences (GÉNÉRÉ, ne pas éditer)

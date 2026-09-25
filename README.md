@@ -8,7 +8,7 @@
 
 ![banner](images/banner.png)
 
-![Version](https://img.shields.io/badge/Version-V4.0-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white)
+![Version](https://img.shields.io/badge/Version-V5.0-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-ESP32--S3-black?style=for-the-badge&logo=espressif&logoColor=white)
 ![Board](https://img.shields.io/badge/Board-Guition%20JC3248W535-blue?style=for-the-badge)
 ![Firmware](https://img.shields.io/badge/Firmware-Arduino-00979D?style=for-the-badge&logo=arduino&logoColor=white)
@@ -21,6 +21,58 @@
 </div>
 
 ---
+
+## 🎬 V5 — every screen is alive
+
+![NEW BLOCK cinematic](images/new-block-cinematic.gif)
+
+*Real frames — rendered by the firmware's own drawing code in the desktop
+simulator ([`firmware/tools/sim`](firmware/tools/sim)).*
+
+- **New block cinematic** — soft flash, the block drops and bounces, shockwave
+  + particle burst, it locks onto the chain, height & pool fade in (replaces the
+  old full-screen orange/black strobe).
+- **Slide transitions** between pages (tab tap or swipe) with a glowing seam —
+  near-free: in landscape each screen column is one contiguous PSRAM row.
+- **Block life-line** under the header on every page: progress toward ~10 min
+  with a glowing comet (turns red when the block is late).
+- **Price**: true gradient area chart that *draws itself* on new data, pulsing
+  live point, logo shine, price flashes green/red on each tick.
+- **On-chain**: mempool.space-style **block strip** — the pending block fills
+  like a liquid (waves + bubbles), the last 4 blocks are colored by median fee,
+  and a new block slides out of the mempool into the chain.
+- **Cube** spins slowly over an isometric floor · **Pools** medals, shine and
+  count-up · **Lightning** live network with routed payments · **F&G** spring
+  needle · node **radar ping** · **DOOM** brick walls, sky/fog gradients.
+- **Animated boot splash** while WiFi connects.
+- **Animation level** on the web page (`http://blockclock.local`):
+  **MAX** (everything alive, ~25 FPS) · **ECO** (transitions + events only) ·
+  **OFF**. MAX falls back to ECO at night (23:00–07:00) for battery/heat.
+
+<details>
+<summary><b>🐛 V5 fixes (click to expand)</b></summary>
+
+- **Memory corruption (BTC DOOM)**: GFX Library 1.4.9 only clips text on the
+  right/bottom — glyphs crossing the left/top edge were written *outside* the
+  framebuffer (heap corruption). Caught by AddressSanitizer in the simulator on
+  the V4 code; fixed with a bounds-checked canvas. Likely cause of the DOOM
+  crashes.
+- **1H chart showed 24 h** (CoinGecko `days=1` = 5-min points over a day).
+- **Voice/flash announced the previous block's pool** (event raised before
+  the new block's details were fetched).
+- **Google TTS truncated**: `read()` returns -1 when no data has arrived *yet*,
+  and the chunked response leaked chunk markers into the MP3 → HTTP/1.0 +
+  `available()` loop.
+- **Signals v2 was never compiled in** (`signals.h` not included) — now wired,
+  with its buffers moved off the 12 KB net stack and HTTP/1.0 streaming.
+- UTF-8 `·`/`—` rendered as garbage glyphs · "last block" timer now uses the
+  real block timestamp (was "0m03s" after every boot) · clock stuck forever in
+  the WiFi portal after a power cut (now retries after 5 min; no 20 s wait when
+  no WiFi is saved) · `getLocalTime(…, 50)` stalls in every frame · halving
+  hard-coded to block 1,050,000 · Poisson λ now from the difficulty epoch ·
+  SAM double definitions (breaks with GCC ≥ 10) · HTML escaping in the portal ·
+  CoinGecko 429 burst on tap-refresh · DOOM camera clipping into walls.
+</details>
 
 ## 🖥️ Firmware — 9 pages, 100 % responsive
 
@@ -42,24 +94,28 @@ watchdog, NTP. **Zero credentials in the code.**
 | 📊 **SIGNALS** | 1D vs 1W trend divergence, Bollinger squeeze, technical score, z-score anomaly alarms |
 | 👾 **BTC DOOM** | Wolfenstein-style raycaster with **dual multi-touch joysticks** (move + strafe / look). Hunt **Saylor** (tank, laser eyes), **Trump** (fast, blond), **Lagarde** (shoots rate hikes), dodge her projectiles, read the wall slogans — HODL, STACK SATS, FIX THE MONEY. Kill popups, voice taunts, waves. |
 
-### 📸 Screens — faithful mockups, straight from the draw code
+### 📸 Screens (V5) — real renders of the firmware drawing code
 
 | | | |
 |---|---|---|
-| ![PRICE](images/screens/page0_prix.png) | ![ON-CHAIN](images/screens/page1_onchain.png) | ![CUBE](images/screens/page2_cube.png) |
+| ![PRICE](images/screens-v5/page0_prix.png) | ![ON-CHAIN](images/screens-v5/page1_onchain.png) | ![CUBE](images/screens-v5/page2_cube.png) |
 | **PRICE** | **ON-CHAIN** | **CUBE** |
-| ![POOLS WAR](images/screens/page3_pools.png) | ![LIGHTNING](images/screens/page4_lightning.png) | ![NODE](images/screens/page5_noeud.png) |
+| ![POOLS WAR](images/screens-v5/page3_pools.png) | ![LIGHTNING](images/screens-v5/page4_lightning.png) | ![NODE](images/screens-v5/page5_noeud.png) |
 | **POOLS WAR** | **LIGHTNING** | **NODE** |
-| ![LOCAL AI](images/screens/page6_ia.png) | ![SIGNALS](images/screens/page7_signaux.png) | ![BTC DOOM](images/screens/page8_doom.png) |
+| ![LOCAL AI](images/screens-v5/page6_ia.png) | ![SIGNALS](images/screens-v5/page7_signaux.png) | ![BTC DOOM](images/screens-v5/page8_doom.png) |
 | **LOCAL AI** | **SIGNALS** | **BTC DOOM** |
 
-New block flash (every page except CUBE):
+New block cinematic and slide transition:
 
-![NEW BLOCK](images/screens/page_newblock.png)
+| | |
+|---|---|
+| ![NEW BLOCK](images/screens-v5/page_newblock.png) | ![TRANSITION](images/screens-v5/transition.png) |
 
-*Mockups rendered by [`firmware/tools/mockup_screens.py`](firmware/tools/mockup_screens.py),
-which replays the actual drawing functions (same RGB565 palette, same
-coordinates, same raycaster) with example data.*
+*Rendered by the desktop simulator [`firmware/tools/sim`](firmware/tools/sim):
+the sketch is compiled for Linux with the real Arduino_GFX library and a
+simulated panel/touch/network, with example data. The V4 mockups
+([`firmware/tools/mockup_screens.py`](firmware/tools/mockup_screens.py)) are
+kept in `images/screens/`.*
 *Dev notes (FR): [`firmware/PROJET-NOTES.md`](firmware/PROJET-NOTES.md).*
 
 ---
@@ -123,6 +179,7 @@ Then **press RESET physically**. First boot: join the `BlockClock-Setup` AP
 │   │   ├── trend_model.h         ML experiment — rejected, see notes
 │   │   └── btc_logo_src.png
 │   ├── tools/                    asset & mockup generators
+│   │   └── sim/                  desktop simulator (real draw code, ASan, video)
 │   └── PROJET-NOTES.md           dev documentation (FR)
 ├── case/                         STLs + parametric Python sources
 ├── images/                       renders, banner & screen mockups

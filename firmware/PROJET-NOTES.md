@@ -37,6 +37,83 @@ Horloge Bitcoin vitrine sur carte Guition JC3248W535 (ESP32-S3 N16R8 + écran 3.
 9. **Port flash** : COM42 (CH340, MAC 20:6e:f1:98:cd:88) — ports variables selon branchements
 10. **API alternative.me (F&G) renvoie `"value"` en CHAÎNE** (`"25"`) : l'opérateur `doc[...] | -1` d'ArduinoJson v7 ne parse PAS les chaînes → renvoie -1 en permanence (jauge bloquée au milieu à 50). Toujours parser explicitement : `is<int>() ? as<int>() : atoi(as<const char*>())`. *(bug prouvé par test natif g++, corrigé le 18/07/2026)*
 
+## ✅ V5 — moteur d'animations + correctifs (09/2026)
+
+### Moteur FX (tout est dessiné dans le canvas PSRAM, 1 flush par frame)
+- **`animLevel`** (NVS `anim`, page web) : `2` MAX = toutes les pages vivantes
+  (~25 FPS, `FX_FRAME_MS 40`) · `1` ECO = pages statiques + transitions +
+  événements · `0` OFF. `fxFull()` = MAX et pas la nuit → la nuit, MAX devient ECO.
+- Helpers : `mix565` (mélange 0..255), easings (`easeOutCubic/Back/Bounce`,
+  `easeInOut`), `fxPulse`, `fxEnter` (animations d'entrée de page depuis
+  `pageEnterMs`), `fxHalo` (dégradé radial), `fxRing` (onde), `fxBar` (barre +
+  reflet + shimmer), `fxShineBitmap` (reflet diagonal sur le logo, écrit
+  directement dans le framebuffer), `fxDimAll` (fondu), poussière de sats de fond.
+- **Transitions glissées** (`fxSlide`/`gotoPage`) : canvas en rotation 1 →
+  chaque colonne logique est une ligne native contiguë de 320 px. Snapshot
+  ancien écran + rendu nouvelle page dans 2 buffers PSRAM (2 × 300 Ko,
+  `ps_malloc` au boot), puis 1 `memcpy` de ~270 px par colonne et par frame
+  (header/footer fixes, soulignement d'onglet qui glisse). Sans PSRAM : coupe franche.
+- **Cinématique NOUVEAU BLOC** (`drawBlockAnim`, 3,3 s) : flash doux unique
+  (plus de stroboscope), cube isométrique qui tombe (easeOutBounce), 3 ondes de
+  choc, gerbe de 44 particules, chaîne qui s'accroche, titre machine à écrire,
+  hauteur/pool en fondu, fondu de sortie. En jeu (DOOM) : simple popup. Temps
+  **signé** (`long e`) : les `(e - 520)` non signés donnaient des fondus déjà finis.
+- **Ligne de vie du bloc** (header, toutes pages) : `secsSinceBlock()` depuis
+  l'horodatage RÉEL du bloc (`blkTs[0]`), comète, rouge après 10 min.
+- **Pages** : Prix (aire en 8 bandes de dégradé, tracé qui se dessine sur
+  900 ms à chaque nouvelle série, point live en ondes, halo + reflet du logo,
+  flash vert/rouge du prix) · On-chain refaite (**frise mempool.space** :
+  `fetchLastBlock` filtré ArduinoJson, garde height/tx/medianFee/pool/ts des 4
+  derniers blocs ; bloc en attente « liquide » rempli au prorata des 10 min ;
+  glissement de la frise au nouveau bloc ; fees colorées par niveau ;
+  difficulté / halving / whale compacts) · Cube (lacet continu `cubeSpin`, sol
+  isométrique, particules par couche) · Pools (médailles, couronne, reflets,
+  compteurs) · Lightning (14 nœuds, 24 canaux, 8 paiements routés de saut en
+  saut, éclair avec halo + éclats) · F&G (aiguille easeOutBack, graduations) ·
+  nœud (radar) · IA (fxBar, barres animées) · DOOM (ciel/sol en dégradé,
+  briques, affiches bornées, collision avec marge 0,2).
+
+### Correctifs V5
+1. **Corruption mémoire** : GFX 1.4.9 (`drawChar`, police glcdfont) ne clippe
+   qu'à droite/en bas ; texte débordant à gauche/en haut → écrit HORS du
+   framebuffer. Prouvé par AddressSanitizer dans le simulateur **sur le code V4**
+   (`heap-buffer-overflow` dans `doomDrawPoster`). → `SafeCanvas` (bornes sur
+   `writePixelPreclipped` / `writeFillRectPreclipped`). Cause probable des
+   « crash DOOM ».
+2. **Graphe 1H = 24 h** (days=1 → 288 pts à 5 min) → 13 derniers points.
+3. **Annonce/flash avec le pool du bloc précédent** : `evNewBlock` levé avant
+   `fetchLastBlock()` → ordre inversé, hauteur publiée avant l'événement.
+4. **TTS Google tronqué** : `WiFiClientSecure::read` = -1 quand rien n'est
+   ENCORE arrivé + réponse chunked lue brute → `useHTTP10(true)` + boucle `available()`.
+5. **`signals.h` jamais inclus** → intégré (voir PATCH-SIGNAUX.md).
+6. UTF-8 `·`/`—` en glyphes parasites · chrono « il y a » depuis l'heure de
+   détection (0m03s au boot) · **portail WiFi sans sortie** après coupure de
+   courant (→ restart au bout de 5 min si un WiFi est configuré ; portail
+   immédiat si aucun) · `getLocalTime(&t, 50)` bloquant à chaque frame →
+   `refreshClock()` + cache `gTm` · halving en dur (1 050 000) → calculé ·
+   λ Poisson depuis `timeAvg` de l'époque (`lambdaEpoch`) · SAM : `A, X, Y`
+   définis 2× (casse avec GCC ≥ 10 / `-fno-common`) · échappement HTML du
+   portail · `/reset` sans charset · anti-rafale CoinGecko (REQ_ALL ≤ 1×/20 s) ·
+   `Wire.requestFrom` ambigu · garde du buffer multi-touch · curseur du graphe
+   remis à zéro par les fetchs de fond · logs `[WM]` derrière `DEBUG_WM`.
+7. netTask : pile 12 → 16 Ko (TLS + JSON + signaux).
+
+### Simulateur desktop (`firmware/tools/sim/`)
+- `build.sh [--asan]` : prétraite le sketch avec arduino-cli (prototypes
+  identiques au build ESP32), le compile pour Linux avec la **vraie** lib
+  Arduino_GFX (algos + Canvas) et des shims (WiFi/HTTP/Wire/I2S/FreeRTOS/NVS
+  simulés, horloge virtuelle, tactile AXS15231B simulé octet par octet).
+- `build/sim <dossier> <mode>` : `pages` (9 captures), `tour`, `pagesanim`,
+  `cube`, `doom`, `boot`, `eco`, `off` (séquences d'images).
+- `make_media.sh` : PNG + `demo.mp4` + `new-block.gif` (ffmpeg).
+- À relancer avec `--asan` après toute modif du rendu.
+
+### Budget V5
+- Compile : **40 % flash, 26 % RAM** (core 2.0.14, GFX 1.4.9, `--warnings all` : 0 warning).
+- PSRAM : framebuffer 300 Ko + 2 × 300 Ko (transitions).
+- ⚠️ À mesurer sur le vrai matériel : FPS réel en MAX (flush QSPI ~ 30-60 ms),
+  conso batterie MAX vs ECO, chauffe.
+
 ## ✅ Features implémentées (V4 — 7 pages + architecture FreeRTOS)
 **Architecture V4 (refonte perf — slides/swipes autrefois bloqués plusieurs secondes par les fetchs synchrones) :**
 - **`netTask` FreeRTOS** (core 0, prio 1, stack 12 Ko) : fait TOUS les appels HTTP + check TCP nœud, avec ses propres timers (height 20 s, price 30 s, whale 60 s, klines 300 s, mempool+fees 120 s, difficulty 600 s, F&G 3600 s, node 60 s, pools 600 s, lightning 600 s). Le `loop()` ne fait plus AUCUN appel réseau → tactile toujours réactif (`delay(10)`).

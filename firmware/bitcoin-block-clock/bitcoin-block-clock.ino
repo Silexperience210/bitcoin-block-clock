@@ -1,5 +1,5 @@
 // =====================================================================
-//  BITCOIN BLOCK CLOCK V4 — Guition JC3248W535 (ESP32-S3 N16R8)
+//  BITCOIN BLOCK CLOCK V5 — Guition JC3248W535 (ESP32-S3 N16R8)
 //  ------------------------------------------------------------------
 //  Paysage 480x320 · 9 pages (swipe + barre d'onglets) :
 //   PRIX / ON-CHAIN / CUBE / POOLS WAR / LIGHTNING / NŒUD / IA / SIGNAUX / BTC DOOM
@@ -21,6 +21,12 @@
 //  • Chiffres lissés anti-aliasés (smooth_font.h, alpha 4 bpp) : prix animé
 //    en transition douce, bloc, F&G, capacité LN
 //  • Config WiFi portail web (+ IP du nœud) · mode nuit · tap/appui long
+//  • V5 — moteur FX : transitions glissées, cinématique NOUVEAU BLOC, ligne
+//    de vie du bloc, frise de blocs façon mempool.space, graphe qui se
+//    dessine, cube en rotation, réseau Lightning vivant, DOOM texturé,
+//    splash animé. Niveau MAX / ECO / OFF sur la page web (ECO la nuit).
+//  • V5 — canvas à bornes vérifiées (débordement mémoire du texte GFX 1.4.9)
+//  • Simulateur desktop : firmware/tools/sim (vrai code de dessin + ASan)
 //
 //  FQBN : esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,
 //         PartitionScheme=huge_app,CPUFreq=240,USBMode=hwcdc,CDCOnBoot=cdc
@@ -80,6 +86,7 @@ private:
   const uint8_t *p; uint32_t n; int32_t pos = 0;
 };
 
+#define DEBUG_WM   0     // 1 = log série des stack high-water marks (diagnostic)
 #define TTS_GOOGLE 1     // 1 = voix naturelle Google (réseau requis) ; 0 = SAM local
 #define TTS_LANG   "en"  // "fr" pour la voix française
 
@@ -149,7 +156,30 @@ float   mnC[CUR_COUNT][TF_COUNT], mxC[CUR_COUNT][TF_COUNT];
 // ---------------- OBJETS ----------------
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(45, 47, 21, 48, 40, 39);
 Arduino_AXS15231B *panel = new Arduino_AXS15231B(bus, GFX_NOT_DEFINED, 0, false, PANEL_W, PANEL_H);
-Arduino_Canvas *gfx = new Arduino_Canvas(PANEL_W, PANEL_H, panel, 0, 0, 1);
+// FIX MÉMOIRE : GFX Library 1.4.9 ne clippe le texte (police glcdfont) qu'à
+// DROITE et en BAS. Un caractère qui déborde à gauche ou en haut est écrit
+// HORS du framebuffer (x < 0 -> avant le buffer PSRAM = corruption du tas).
+// BTC DOOM le déclenchait sans cesse (affiches / noms d'ennemis au bord de
+// l'écran) : cause probable des "crash DOOM" traqués avec les logs [WM].
+// Ce canvas vérifie les bornes des deux primitives "préclippées" utilisées
+// par le rendu du texte ; les lignes/rectangles passaient déjà par un clip.
+class SafeCanvas : public Arduino_Canvas {
+public:
+  using Arduino_Canvas::Arduino_Canvas;
+  void writePixelPreclipped(int16_t x, int16_t y, uint16_t color) override {
+    if (x < 0 || y < 0 || x >= _width || y >= _height) return;
+    Arduino_Canvas::writePixelPreclipped(x, y, color);
+  }
+  void writeFillRectPreclipped(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > _width)  w = _width - x;
+    if (y + h > _height) h = _height - y;
+    if (w <= 0 || h <= 0) return;
+    Arduino_Canvas::writeFillRectPreclipped(x, y, w, h, color);
+  }
+};
+Arduino_Canvas *gfx = new SafeCanvas(PANEL_W, PANEL_H, panel, 0, 0, 1);
 Preferences prefs;
 WebServer server(80);
 
@@ -201,6 +231,14 @@ float lnCapBtc = 0;
 long  lnChannels = 0, lnNodes = 0, lnAvgCap = 0;
 int   lnAvgFeePpm = 0;
 
+// Frise des derniers blocs (page ON-CHAIN, protégée par dataMux)
+#define STRIP_N 4
+long  stripH[STRIP_N] = {0}, stripTx[STRIP_N] = {0}, stripTs[STRIP_N] = {0};
+float stripFee[STRIP_N] = {0};
+char  stripPool[STRIP_N][14];
+int   stripN = 0;
+long  lambdaEpoch = 0;        // s/bloc mesuré sur l'époque de difficulté (0 = inconnu)
+
 // ---------------- SYNCHRO netTask <-> UI ----------------
 // spinlock pour les chaînes / tableaux partagés
 portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
@@ -218,7 +256,8 @@ portMUX_TYPE reqMux  = portMUX_INITIALIZER_UNLOCKED;
 #define REQ_DIFF     0x100
 #define REQ_NODE     0x200
 #define REQ_KL30     0x400   // cache 30J (moteur prédictif page IA)
-#define REQ_ALL      0x7FF
+#define REQ_SIGNALS  0x800   // signaux calibrés (Binance 1d/1w, signals.h)
+#define REQ_ALL      0xFFF
 volatile uint32_t fetchReq = 0;
 
 void requestFetch(uint32_t bits) {
@@ -242,6 +281,146 @@ volatile bool needRedraw = true;
 // état tactile courant (pour BTC DOOM : suivi continu du doigt)
 bool     gTouch = false;
 uint16_t gTX = 0, gTY = 0;
+
+// =====================================================================
+//  FX — moteur d'animations V5
+//  ------------------------------------------------------------------
+//  animLevel (NVS "anim", réglable sur la page web) :
+//    2 = MAX  : toutes les pages vivantes (~25 FPS) + transitions + events
+//    1 = ECO  : pages statiques (redraw sur événement) + transitions + events
+//    0 = OFF  : aucun effet (comportement V4)
+//  La nuit (23h-7h), MAX retombe automatiquement en ECO (batterie/chauffe).
+//  Tout est dessiné dans le canvas PSRAM puis flushé en une fois : aucun
+//  effet ne touche directement le panel.
+// =====================================================================
+#define FX_FRAME_MS 40                 // ~25 FPS pour les pages vivantes
+#define FB_PIX  (SCR_W * SCR_H)
+uint8_t animLevel = 2;
+unsigned long fxT = 0;                 // horodatage de la frame en cours
+unsigned long pageEnterMs = 0;         // arrivée sur la page (animations d'entrée)
+struct tm gTm;                         // heure locale en cache (1 lecture / loop)
+bool gTmOk = false;
+uint16_t *fxPrevFb = nullptr, *fxNextFb = nullptr;   // transitions (PSRAM)
+
+inline bool fxFull() { return animLevel >= 2 && !nightMode; }
+inline bool fxAny()  { return animLevel >= 1; }
+
+// heure locale sans blocage : getLocalTime(&t, 50) attendait jusqu'à 50 ms
+// PAR APPEL tant que le NTP n'était pas synchronisé (plusieurs fois par frame)
+void refreshClock() { gTmOk = getLocalTime(&gTm, 0); }
+
+// mélange RGB565 : t = 0 -> a, 255 -> b
+uint16_t mix565(uint16_t a, uint16_t b, uint8_t t) {
+  uint32_t r = ((a >> 11) & 31) * (255 - t) + ((b >> 11) & 31) * t;
+  uint32_t g = ((a >> 5) & 63) * (255 - t) + ((b >> 5) & 63) * t;
+  uint32_t bl = (a & 31) * (255 - t) + (b & 31) * t;
+  return (uint16_t)(((r / 255) << 11) | ((g / 255) << 5) | (bl / 255));
+}
+inline uint8_t u8f(float f) { return f <= 0 ? 0 : f >= 1 ? 255 : (uint8_t)(f * 255); }
+inline float clamp01(float k) { return k < 0 ? 0 : (k > 1 ? 1 : k); }
+float easeOutCubic(float k) { k = clamp01(k); float u = 1 - k; return 1 - u * u * u; }
+float easeInOut(float k)    { k = clamp01(k); return k < 0.5f ? 4 * k * k * k : 1 - powf(-2 * k + 2, 3) / 2; }
+float easeOutBack(float k)  { k = clamp01(k); const float c1 = 1.70158f, c3 = c1 + 1; float u = k - 1; return 1 + c3 * u * u * u + c1 * u * u; }
+float easeOutBounce(float k) {
+  k = clamp01(k); const float n1 = 7.5625f, d1 = 2.75f;
+  if (k < 1 / d1) return n1 * k * k;
+  if (k < 2 / d1) { k -= 1.5f / d1; return n1 * k * k + 0.75f; }
+  if (k < 2.5f / d1) { k -= 2.25f / d1; return n1 * k * k + 0.9375f; }
+  k -= 2.625f / d1; return n1 * k * k + 0.984375f;
+}
+// oscillation 0..1 (cosinus) de période periodMs
+float fxPulse(unsigned long periodMs, unsigned long phase = 0) {
+  return 0.5f - 0.5f * cosf(2 * PI * (float)((fxT + phase) % periodMs) / periodMs);
+}
+// progression 0..1 d'une animation d'entrée de page (1 si animations coupées)
+float fxEnter(unsigned long durMs, unsigned long delayMs = 0) {
+  if (!fxFull()) return 1.0f;
+  long e = (long)(fxT - pageEnterMs) - (long)delayMs;
+  return easeOutCubic(e / (float)durMs);
+}
+// accès direct au framebuffer du canvas (rotation 1 : colonne logique x = ligne native)
+inline uint16_t *fxPix(int x, int y) { return gfx->getFramebuffer() + (int32_t)x * PANEL_W + (PANEL_W - 1 - y); }
+
+// halo radial (disques concentriques du bord, faible, vers le centre, fort)
+void fxHalo(int cx, int cy, int r, uint16_t c, uint16_t bg, uint8_t strength, int step = 3) {
+  for (int i = r; i > 0; i -= step) {
+    uint8_t t = (uint8_t)((uint32_t)strength * (r - i + step) / (r + step));
+    gfx->fillCircle(cx, cy, i, mix565(bg, c, t));
+  }
+}
+// anneau d'onde (2 px) qui s'élargit et s'estompe : k = 0..1
+void fxRing(int cx, int cy, int r0, int r1, float k, uint16_t c, uint16_t bg) {
+  if (k <= 0 || k >= 1) return;
+  int r = r0 + (int)((r1 - r0) * k);
+  uint16_t col = mix565(bg, c, u8f(1 - k));
+  gfx->drawCircle(cx, cy, r, col);
+  gfx->drawCircle(cx, cy, r + 1, col);
+}
+// barre de progression arrondie + reflet + bande lumineuse qui défile
+void fxBar(int x, int y, int w, int h, float frac, uint16_t c, uint16_t track, bool shimmer = true) {
+  gfx->fillRoundRect(x, y, w, h, h / 2, track);
+  int fw = (int)(w * clamp01(frac));
+  if (fw < h) { if (fw > 1) gfx->fillRoundRect(x, y, h, h, h / 2, c); return; }
+  gfx->fillRoundRect(x, y, fw, h, h / 2, c);
+  if (h >= 6) gfx->drawFastHLine(x + h / 2, y + 1, fw - h, mix565(c, C_WHITE, 110));
+  if (shimmer && fxFull() && fw > 16) {
+    int sx = x + (int)((fxT % 1800) / 1800.0f * (fw + 40)) - 20;
+    for (int i = 0; i < 14; i++) {
+      int xx = sx + i;
+      if (xx < x + 2 || xx >= x + fw - 2) continue;
+      gfx->drawFastVLine(xx, y + 1, h - 2, mix565(c, C_WHITE, (uint8_t)(150 - abs(i - 7) * 20)));
+    }
+  }
+}
+// reflet diagonal sur un bitmap RGB565 à couleur transparente (logo)
+void fxShineBitmap(int x0, int y0, const uint16_t *bmp, int w, int h, uint16_t tr, float pos, int bw, uint8_t amt) {
+  if (pos <= 0 || pos >= 1) return;
+  int span = w + h / 2 + bw;
+  int xs = -h / 2 - bw + (int)(pos * span);
+  for (int y = 0; y < h; y++) {
+    int xb = xs + y / 2;
+    for (int x = max(0, xb); x < min(w, xb + bw); x++) {
+      if (bmp[y * w + x] == tr) continue;
+      int sx = x0 + x, sy = y0 + y;
+      if (sx < 0 || sx >= SCR_W || sy < 0 || sy >= SCR_H) continue;
+      uint16_t *p = fxPix(sx, sy);
+      *p = mix565(*p, C_WHITE, amt);
+    }
+  }
+}
+// assombrit tout l'écran vers C_BG (fondu de sortie)
+void fxDimAll(uint8_t amt) {
+  uint16_t *fb = gfx->getFramebuffer();
+  if (!fb) return;
+  for (int i = 0; i < FB_PIX; i++) fb[i] = mix565(fb[i], C_BG, amt);
+}
+
+// ---------- poussière de sats : particules de fond très discrètes ----------
+#define FX_NDUST 36
+struct FxDust { float x, y, v, ph; uint8_t b; };
+FxDust fxDust[FX_NDUST];
+bool fxDustInit = false;
+void fxDrawDust() {
+  if (!fxFull()) return;
+  static unsigned long last = 0;
+  if (!fxDustInit) {
+    for (int i = 0; i < FX_NDUST; i++) {
+      fxDust[i].x = random(0, SCR_W); fxDust[i].y = random(30, 292);
+      fxDust[i].v = 6 + random(0, 18); fxDust[i].ph = random(0, 628) / 100.0f;
+      fxDust[i].b = 22 + random(0, 50);
+    }
+    fxDustInit = true; last = fxT;
+  }
+  float dt = min(0.1f, (fxT - last) / 1000.0f); last = fxT;
+  for (int i = 0; i < FX_NDUST; i++) {
+    FxDust &d = fxDust[i];
+    d.y -= d.v * dt;
+    if (d.y < 30) { d.y = 290; d.x = random(0, SCR_W); }
+    int xx = (int)(d.x + sinf(fxT / 1000.0f * 0.7f + d.ph) * 7);
+    uint16_t c = mix565(C_BG, C_ORANGE, d.b);
+    if (d.b > 55) gfx->fillRect(xx, (int)d.y, 2, 2, c); else gfx->drawPixel(xx, (int)d.y, c);
+  }
+}
 
 // =====================================================================
 //  AUDIO — cloche synthétisée I2S + sndTask non bloquante
@@ -396,21 +575,30 @@ bool speakGoogle(const char *text, const char *lang) {
   WiFiClientSecure client; client.setInsecure();
   HTTPClient http;
   http.setTimeout(8000);
+  // FIX : HTTP/1.0 -> Google ne répond plus en "chunked" ; avant, les
+  // marqueurs de chunk (\r\n1f40\r\n...) se retrouvaient DANS le MP3.
+  http.useHTTP10(true);
   if (!http.begin(client, url)) return false;
   int code = http.GET();
   if (code != 200) { Serial.printf("[TTS] HTTP %d\n", code); http.end(); return false; }
-  // Google répond en chunked (pas de Content-Length) : on lit jusqu'à EOF
+  // flux brut jusqu'à la fermeture de la connexion
   const int TTS_MAX = 65536;
   uint8_t *mp3 = (uint8_t*)ps_malloc(TTS_MAX);
   if (!mp3) { http.end(); return false; }
   WiFiClient *st = http.getStreamPtr();
   int got = 0;
   unsigned long t0 = millis();
+  // FIX : WiFiClientSecure::read() renvoie -1 quand AUCUNE donnée n'est
+  // encore arrivée (pas seulement en fin de flux) -> l'ancienne boucle
+  // s'arrêtait au premier creux réseau et tronquait la phrase.
   while (got < TTS_MAX && millis() - t0 < 10000) {
-    int r = st->read(mp3 + got, TTS_MAX - got);
-    if (r < 0) break;                    // fin du flux
-    if (r == 0 && !st->connected()) break;
-    got += r;
+    int av = st->available();
+    if (av <= 0) {
+      if (!st->connected()) break;       // vraie fin du flux
+      delay(4); continue;
+    }
+    int r = st->read(mp3 + got, min(av, TTS_MAX - got));
+    if (r > 0) got += r;
   }
   http.end();
   if (got < 1000) { Serial.printf("[TTS] trop court %d\n", got); free(mp3); return false; }
@@ -454,9 +642,11 @@ void sndTask(void *param) {
       if (n.kind == SND_EVENT && (nightMode || sleeping)) continue;  // silencieux la nuit / en veille
       synthBell((float)n.freq, n.durMs / 1000.0f, n.vol / 100.0f);
     }
+#if DEBUG_WM
     static unsigned long tWm2 = 0;
     if (millis() - tWm2 > 10000) { tWm2 = millis();
       Serial.printf("[WM] snd free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
+#endif
   }
 }
 
@@ -482,7 +672,7 @@ bool readTouch(uint16_t &x, uint16_t &y) {
   Wire.beginTransmission(TP_ADDR);
   Wire.write(cmd, 8);
   if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(TP_ADDR, (uint8_t)8) != 8) return false;
+  if (Wire.requestFrom((uint8_t)TP_ADDR, (uint8_t)8) != 8) return false;
   uint8_t d[8];
   for (int i = 0; i < 8; i++) d[i] = Wire.read();
   if (d[0] != 0 || d[1] == 0) return false;
@@ -500,11 +690,12 @@ bool readTouch(uint16_t &x, uint16_t &y) {
 // ev : 1 = relevé, sinon pression. Retourne le nombre de doigts.
 int readTouchMulti(uint16_t *xs, uint16_t *ys, uint8_t *ev, int maxPts) {
   static const uint8_t cmd[8] = {0xB5, 0xAB, 0xA5, 0x5A, 0, 0, 0, 0x08};
+  if (maxPts > 5) maxPts = 5;                      // d[30] = 5 doigts max
   Wire.beginTransmission(TP_ADDR);
   Wire.write(cmd, 8);
   if (Wire.endTransmission(false) != 0) return 0;
   int want = maxPts * 6;
-  if (Wire.requestFrom(TP_ADDR, (uint8_t)want) != want) return 0;
+  if (Wire.requestFrom((uint8_t)TP_ADDR, (uint8_t)want) != want) return 0;
   uint8_t d[30];
   for (int i = 0; i < want; i++) d[i] = Wire.read();
   if (d[1] == 0) return 0;
@@ -533,6 +724,7 @@ void loadConfig() {
   alertHi    = prefs.getFloat("alertHi", 0);
   alertLo    = prefs.getFloat("alertLo", 0);
   sndVolPct  = prefs.getUChar("sndvol", 100);
+  animLevel  = min((uint8_t)2, prefs.getUChar("anim", 2));
   feeSamples = prefs.getLong("feesmp", 0);
   if (prefs.getBytes("feebkt", feeBkt, sizeof(feeBkt)) != sizeof(feeBkt))
     memset(feeBkt, 0, sizeof(feeBkt));
@@ -555,6 +747,7 @@ void saveConfig() {
   prefs.putFloat("alertHi", alertHi);
   prefs.putFloat("alertLo", alertLo);
   prefs.putUChar("sndvol", sndVolPct);
+  prefs.putUChar("anim", animLevel);
   prefs.end();
 }
 
@@ -572,10 +765,22 @@ button{width:100%;padding:14px;background:#F7931A;color:#000;font-weight:bold;bo
 <input name='nodeip' value='%NODEIP%' placeholder='192.168.1.110'>
 <button>Enregistrer &amp; redemarrer</button></form></body></html>)HTML";
 
+// échappement HTML (SSID / IP saisis par l'utilisateur ou diffusés par des voisins)
+String htmlEsc(const String &in) {
+  String o;
+  for (unsigned int i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '<') o += "&lt;"; else if (c == '>') o += "&gt;";
+    else if (c == '&') o += "&amp;"; else if (c == '\'') o += "&#39;";
+    else if (c == '"') o += "&quot;"; else o += c;
+  }
+  return o;
+}
+
 String scanNetworks() {
   int n = WiFi.scanNetworks();
-  String s = "<select onchange=\"document.getElementsByName('ssid')[0].value=this.value\"><option value=''>— reseaux —</option>";
-  for (int i = 0; i < n && i < 15; i++) s += "<option>" + WiFi.SSID(i) + "</option>";
+  String s = "<select onchange=\"document.getElementsByName('ssid')[0].value=this.value\"><option value=''>-- reseaux --</option>";
+  for (int i = 0; i < n && i < 15; i++) { String e = htmlEsc(WiFi.SSID(i)); s += "<option value='" + e + "'>" + e + "</option>"; }
   return s + "</select>";
 }
 
@@ -594,7 +799,7 @@ void startConfigPortal() {
   server.on("/", HTTP_GET, []() {
     String p = FPSTR(SETUP_PAGE);
     p.replace("%NETWORKS%", scanNetworks());
-    p.replace("%NODEIP%", cfg_nodeip);
+    p.replace("%NODEIP%", htmlEsc(cfg_nodeip));
     server.send(200, "text/html", p);
   });
   server.on("/save", HTTP_POST, []() {
@@ -606,7 +811,14 @@ void startConfigPortal() {
     delay(1200); ESP.restart();
   });
   server.begin();
-  while (true) { server.handleClient(); delay(2); }
+  // FIX : si un WiFi est déjà configuré (ex. coupure de courant, box plus
+  // lente à redémarrer que l'horloge), on ne reste pas coincé à vie dans le
+  // portail : redémarrage au bout de 5 min pour retenter la connexion.
+  unsigned long tp = millis();
+  while (true) {
+    server.handleClient(); delay(2);
+    if (cfg_ssid.length() > 0 && millis() - tp > 300000UL) { Serial.println("[WiFi] portail : délai, nouvel essai"); ESP.restart(); }
+  }
 }
 
 // =====================================================================
@@ -671,10 +883,15 @@ void fetchKlinesView(uint8_t fc, uint8_t ft) {
   JsonArray prices = doc["prices"];
   int total = prices.size();
   if (total < 2) return;
-  int step = max(1, total / TF_TARGET[ft]);
+  // FIX 1H : days=1 renvoie ~288 points à 5 min sur 24 h ; l'ancien
+  // sous-échantillonnage (step = 288/12) affichait donc 24 h sous "1H".
+  // On garde maintenant les 13 derniers points (= la dernière heure).
+  int start = 0, step;
+  if (ft == TF_1H) { start = max(0, total - (TF_TARGET[ft] + 1)); step = 1; }
+  else step = max(1, total / TF_TARGET[ft]);
   // remplissage en local puis copie protégée (l'UI lit pendant ce temps)
   float tc[MAX_PTS]; long tt[MAX_PTS]; int tn = 0;
-  for (int i = 0; i < total && tn < MAX_PTS; i += step) {
+  for (int i = start; i < total && tn < MAX_PTS; i += step) {
     tc[tn] = prices[i][1].as<float>();
     tt[tn] = (long)(prices[i][0].as<long long>() / 1000);
     tn++;
@@ -692,9 +909,9 @@ void fetchKlinesView(uint8_t fc, uint8_t ft) {
     memcpy(tsOf, tt, tn * sizeof(long));
     nPts = tn;
     gChartMin = mn; gChartMax = mx;
+    cursorIdx = -1;                           // FIX : seulement si c'est la vue affichée
   }
   portEXIT_CRITICAL(&dataMux);
-  cursorIdx = -1;
 }
 
 // Charge le slot cache de la vue courante (instantané) ; slot vide -> nPts=0
@@ -723,8 +940,12 @@ void fetchHeight() {
   if (h <= 0) return;
   if (blockHeight > 0 && h > blockHeight) {
     Serial.printf("[BLOCK] Nouveau bloc %ld !\n", h);
-    evNewBlock = true;          // le loop déclenchera anim + dong
+    // FIX course core0/core1 : on récupère d'abord pool + tx du NOUVEAU
+    // bloc et on publie la hauteur, PUIS on lève l'événement. Avant, l'UI
+    // annonçait (voix + flash) le pool du bloc PRÉCÉDENT.
     fetchLastBlock();
+    blockHeight = h;
+    evNewBlock = true;          // le loop déclenchera anim + annonce
   }
   blockHeight = h;
   dataOk = true;
@@ -790,21 +1011,38 @@ void fetchFees() {
 void fetchLastBlock() {
   String r;
   if (!httpGet("https://mempool.space/api/v1/blocks", r)) return;
+  // filtre : 15 blocs avec extras complets = gros payload, on ne garde que l'utile
+  JsonDocument filter;
+  filter[0]["height"] = true;
+  filter[0]["timestamp"] = true;
+  filter[0]["tx_count"] = true;
+  filter[0]["extras"]["medianFee"] = true;
+  filter[0]["extras"]["pool"]["name"] = true;
   JsonDocument doc;
-  if (deserializeJson(doc, r)) return;
+  if (deserializeJson(doc, r, DeserializationOption::Filter(filter))) return;
   JsonObject b = doc[0];
   if (b.isNull()) return;
   long ts[6]; int n = 0;
+  long sH[STRIP_N]; long sTx[STRIP_N]; float sFee[STRIP_N]; long sTs[STRIP_N]; char sPool[STRIP_N][14]; int sn = 0;
   for (JsonObject blk : doc.as<JsonArray>()) {
-    if (n >= 6) break;
     long t = blk["timestamp"] | 0L;
-    if (t > 0) ts[n++] = t;
+    if (n < 6 && t > 0) ts[n++] = t;
+    if (sn < STRIP_N) {
+      sH[sn] = blk["height"] | 0L; sTx[sn] = blk["tx_count"] | 0L;
+      sFee[sn] = blk["extras"]["medianFee"] | 0.0f; sTs[sn] = t;
+      strlcpy(sPool[sn], blk["extras"]["pool"]["name"] | "?", sizeof(sPool[sn]));
+      sn++;
+    }
+    if (n >= 6 && sn >= STRIP_N) break;
   }
   portENTER_CRITICAL(&dataMux);
   strlcpy(lastPool, b["extras"]["pool"]["name"] | "-", sizeof(lastPool));
   lastBlockTx = b["tx_count"] | 0L;
   memcpy(blkTs, ts, n * sizeof(long));
   blkTsN = n;
+  memcpy(stripH, sH, sizeof(sH)); memcpy(stripTx, sTx, sizeof(sTx));
+  memcpy(stripFee, sFee, sizeof(sFee)); memcpy(stripTs, sTs, sizeof(sTs));
+  memcpy(stripPool, sPool, sizeof(sPool)); stripN = sn;
   portEXIT_CRITICAL(&dataMux);
 }
 
@@ -862,6 +1100,10 @@ void fetchDifficulty() {
   if (deserializeJson(doc, r)) return;
   diffRemaining = doc["remainingBlocks"] | 0L;
   diffChange = doc["difficultyChange"] | 0.0f;
+  // rythme mesuré sur toute l'époque (~2016 blocs) : bien plus stable que
+  // la moyenne des 6 derniers blocs (écart-type ~45 %) — cf. PATCH-SIGNAUX.md
+  double tAvg = doc["timeAvg"] | 0.0;          // ms / bloc
+  if (tAvg > 0) lambdaEpoch = constrain((long)(tAvg / 1000.0), 300L, 1200L);
 }
 
 // ---- Pools war (1 semaine) — payload volumineux : filtre obligatoire ----
@@ -919,10 +1161,14 @@ void checkNode() {
 //  Timers périodiques + requêtes à la demande (bitmask fetchReq).
 //  Le loop() ne fait plus aucun I/O bloquant -> tactile réactif.
 // =====================================================================
+static bool fetchSignals();   // signals.h (inclus plus bas, après les helpers UI)
+
 void netTask(void *param) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(500));
   unsigned long tHeight = 0, tPrice = 0, tKlines = 0, tMempool = 0, tWhale = 0,
-                tDiff = 0, tFng = 0, tNode = 0, tPools = 0, tLn = 0, tKl30 = 0, tBktSave = 0;
+                tDiff = 0, tFng = 0, tNode = 0, tPools = 0, tLn = 0, tKl30 = 0, tBktSave = 0,
+                tSig = 0;
+  bool sigOk = false;
   for (;;) {
     unsigned long now = millis();
     // consommation atomique des requêtes UI
@@ -943,6 +1189,12 @@ void netTask(void *param) {
     // FNG : si jamais récupéré, réessayer toutes les 5 min (sinon 1 h)
     if ((req & REQ_FNG) || now - tFng > (fngValue < 0 ? 300000UL : 3600000UL)) { tFng = now; fetchFng(); worked = true; }
     if ((req & REQ_NODE)    || now - tNode    > 60000)   { tNode = now;    checkNode(); worked = true; }
+    // signaux calibrés (signals.h) : 2 requêtes Binance ~55 Ko en streaming, 1×/4 h
+    // (échec -> nouvel essai dans 10 min)
+    if ((req & REQ_SIGNALS) || tSig == 0 || now - tSig > (sigOk ? 4UL * 3600 * 1000 : 600000UL)) {
+      tSig = now; if (tSig == 0) tSig = 1;
+      sigOk = fetchSignals(); worked = true;
+    }
 
     // sauvegarde NVS des cycles de fees (max 1×/30 min)
     if (feeBktDirty && now - tBktSave > 1800000) { tBktSave = now; saveFeeBuckets(); }
@@ -954,9 +1206,11 @@ void netTask(void *param) {
 
     if (worked) needRedraw = true;
     vTaskDelay(pdMS_TO_TICKS(200));
+#if DEBUG_WM
     static unsigned long tWm3 = 0;
     if (worked && millis() - tWm3 > 10000) { tWm3 = millis();
       Serial.printf("[WM] net free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
+#endif
   }
 }
 
@@ -1003,6 +1257,7 @@ void drawArrow(int x, int y, bool up, uint16_t color) {
 #define BAT_DIV    1.68f   // ratio du diviseur (68K/100K)
 #define BAT_OFFSET 0.13f   // calibration (ADC ESP32 ±3-8 % ; yoRadio mesure +0.127 V sur ces cartes)
 #define DEBUG_BAT 1        // 1 = log série [BAT] toutes les 5 s (0 pour couper)
+
 
 float vbatNow = 0.0f;
 int   batPctNow = -1;
@@ -1099,14 +1354,33 @@ int drawSmooth(int x, int y, const char *s, uint16_t fg, uint16_t bg) {
 }
 
 // ---------- header / footer communs ----------
+// secondes depuis le dernier bloc, d'après l'horodatage RÉEL du bloc
+// (FIX : l'ancien chrono partait du moment où l'horloge avait DÉTECTÉ le
+//  bloc -> "il y a 0m03s" à chaque démarrage)
+long secsSinceBlock() {
+  long t0;
+  portENTER_CRITICAL(&dataMux);
+  t0 = blkTsN > 0 ? blkTs[0] : 0;
+  portEXIT_CRITICAL(&dataMux);
+  time_t now = time(nullptr);
+  if (t0 <= 0 || now < 1600000000) return -1;
+  return max(0L, (long)now - t0);
+}
+
 void drawHeader() {
-  struct tm t;
+  // fond : dégradé vertical discret
+  for (int y = 0; y < 26; y++) gfx->drawFastHLine(0, y, SCR_W, mix565(C_PANEL, C_BG, (uint8_t)(y * 255 / 25)));
   gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
   gfx->setCursor(10, 8);
-  if (getLocalTime(&t, 50)) gfx->printf("%02d:%02d", t.tm_hour, t.tm_min); else gfx->print("--:--");
+  if (gTmOk) {
+    gfx->printf("%02d", gTm.tm_hour);
+    bool colonOn = !fxFull() || (gTm.tm_sec % 2 == 0);       // deux-points qui battent la seconde
+    gfx->setTextColor(colonOn ? C_WHITE : C_DGREY); gfx->print(":");
+    gfx->setTextColor(C_WHITE); gfx->printf("%02d", gTm.tm_min);
+  } else gfx->print("--:--");
   gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
   gfx->setCursor(78, 12);
-  if (getLocalTime(&t, 50)) gfx->printf("%02d/%02d", t.tm_mday, t.tm_mon + 1);
+  if (gTmOk) gfx->printf("%02d/%02d", gTm.tm_mday, gTm.tm_mon + 1);
   // wifi : dot 1 = état (vert connecté / rouge déconnecté),
   //        dots 2-3 = force du signal (RSSI)
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
@@ -1144,7 +1418,27 @@ void drawHeader() {
   else strlcpy(bps, "--", sizeof(bps));
   gfx->setCursor(444 + (28 - (int)strlen(bps) * 6) / 2, 9);
   gfx->print(bps);
+
+  // ---- LIGNE DE VIE DU BLOC : progression vers ~10 min + comète ----
   gfx->drawFastHLine(0, 26, SCR_W, C_LINE);
+  long el = secsSinceBlock();
+  if (el >= 0) {
+    float k = el / 600.0f;
+    bool late = k > 1.0f;                                     // > 10 min : vire au rouge
+    int w = (int)(SCR_W * clamp01(k));
+    uint16_t c = late ? mix565(C_ORANGE, C_RED, u8f(fxFull() ? fxPulse(1600) : 1.0f)) : C_ORANGE;
+    for (int x = 0; x < w; x += 8)
+      gfx->drawFastHLine(x, 26, min(8, w - x), mix565(C_ORANGE_D, c, (uint8_t)(x * 255 / max(1, w))));
+    gfx->drawFastHLine(0, 25, w, mix565(C_BG, c, 60));
+    if (!late && w > 3) {
+      if (fxFull()) {
+        int r = 3 + (int)(2 * fxPulse(900));
+        gfx->fillCircle(w, 26, r, mix565(C_BG, C_YELLOW, 70));
+      }
+      gfx->fillCircle(w, 26, 2, C_YELLOW);
+      gfx->drawPixel(w, 26, C_WHITE);
+    }
+  }
 }
 
 // barre d'onglets : 9 icônes, tap = accès direct à la page
@@ -1208,14 +1502,22 @@ void drawTabIcon(int i, int cx, int cy, uint16_t c) {
   }
 }
 
+float fxTabX = -1;          // position animée du soulignement d'onglet
+
 void drawFooter() {
   gfx->drawFastHLine(0, NAV_Y, SCR_W, C_LINE);
+  float target = page * TAB_W + TAB_W / 2.0f;
+  if (fxTabX < 0 || !fxFull()) fxTabX = target;
+  else { fxTabX += (target - fxTabX) * 0.35f; if (fabsf(target - fxTabX) < 0.6f) fxTabX = target; }
+  int ux = (int)fxTabX;
+  if (fxFull()) fxHalo(ux, SCR_H - 14, 11, C_ORANGE, C_BG, (uint8_t)(35 + 30 * fxPulse(2400)));
   for (int i = 0; i < PG_COUNT; i++) {
     int cx = i * TAB_W + TAB_W / 2;
     bool act = (i == page);
     drawTabIcon(i, cx, SCR_H - 14, act ? C_ORANGE : C_DGREY);
-    if (act) gfx->fillRect(i * TAB_W + TAB_W / 2 - 16, SCR_H - 3, 32, 3, C_ORANGE);
   }
+  gfx->fillRoundRect(ux - 16, SCR_H - 3, 32, 3, 1, C_ORANGE);
+  gfx->drawFastHLine(ux - 10, SCR_H - 3, 20, C_YELLOW);
 }
 
 // =====================================================================
@@ -1226,9 +1528,10 @@ void drawFooter() {
 #define GW 284
 #define GH 190
 
-// drawChart optimisé : polyline en drawLine natif (2 passes),
-// fill dégradé en drawFastVLine tous les 2 px (≈ x10 plus rapide
-// que l'ancien remplissage drawPixel par drawPixel).
+// drawChart V5 : aire en VRAI dégradé (bandes), ligne avec lueur, grille,
+// tracé qui "se dessine" à chaque nouvelle série, point final pulsant.
+unsigned long chartAnimMs = 0;
+
 void drawChart() {
   gfx->fillRoundRect(GX - 6, GY - 8, GW + 12, GH + 40, 8, C_PANEL);
   // snapshot protégé des données (écrites par netTask)
@@ -1238,7 +1541,21 @@ void drawChart() {
   memcpy(c, closes, n * sizeof(float));
   memcpy(ts, tsOf, n * sizeof(long));
   portEXIT_CRITICAL(&dataMux);
-  if (n < 2) { textCenter("chargement...", GY + GH / 2, 1, C_GREY); return; }
+  if (n < 2) {
+    // FIX : "chargement..." centré sur le graphe (il l'était sur l'écran)
+    gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+    gfx->setCursor(GX + GW / 2 - 39, GY + GH / 2 + 14); gfx->print("chargement...");
+    for (int i = 0; i < 8; i++) {                         // spinner
+      float a = i * PI / 4 + (fxFull() ? fxT / 180.0f : 0);
+      uint8_t k = (uint8_t)(40 + i * 26);
+      gfx->fillCircle(GX + GW / 2 + (int)(cosf(a) * 12), GY + GH / 2 - 8 + (int)(sinf(a) * 12), 2, mix565(C_PANEL, C_ORANGE, k));
+    }
+    return;
+  }
+  // nouvelle série (fetch, switch devise/timeframe) -> rejouer le tracé
+  static int lastN = -1; static float lastA = 0, lastB = 0;
+  if (n != lastN || c[0] != lastA || c[n - 1] != lastB) { lastN = n; lastA = c[0]; lastB = c[n - 1]; chartAnimMs = fxT; }
+  float kr = fxFull() ? easeOutCubic((long)(fxT - chartAnimMs) / 900.0f) : 1.0f;
 
   float mn = c[0], mx = c[0];
   for (int i = 1; i < n; i++) { if (c[i] < mn) mn = c[i]; if (c[i] > mx) mx = c[i]; }
@@ -1246,39 +1563,64 @@ void drawChart() {
 
   auto yOf = [&](float v) { return GY + GH - 6 - (int)((v - mn) / range * (GH - 14)); };
   auto xOf = [&](int i) { return GX + 4 + (int)((long)i * (GW - 10) / (n - 1)); };
+  const int xRev = GX + 4 + (int)((GW - 10) * kr);       // abscisse déjà tracée
+  bool up = c[n - 1] >= c[0];
+  uint16_t lc = up ? C_GREEN : C_RED;
 
-  // pointillés prix d'ouverture
+  // grille discrète + pointillés du prix d'ouverture
+  for (int g = 1; g <= 3; g++) {
+    int gy = GY + (GH - 10) * g / 4;
+    for (int x = GX + 4; x < GX + GW - 6; x += 5) gfx->drawPixel(x, gy, C_LINE);
+  }
   int yOpen = yOf(c[0]);
   for (int x = GX + 4; x < GX + GW - 6; x += 6) gfx->fillRect(x, yOpen, 3, 1, C_DGREY);
 
-  // fill dégradé : vlines tous les 2 px (tiers haut orange foncé, reste panel)
-  int base = GY + GH - 4;
+  // aire sous la courbe : dégradé vertical en 8 bandes (couleur de tendance)
+  const int NB = 8;
+  uint16_t band[NB];
+  for (int k = 0; k < NB; k++) band[k] = mix565(C_PANEL, lc, (uint8_t)(92 - k * 11));
+  const int base = GY + GH - 4, top0 = GY, bandH = (base - top0) / NB + 1;
   for (int i = 0; i < n - 1; i++) {
     int x0 = xOf(i), x1 = xOf(i + 1);
+    if (x0 > xRev) break;
     int y0 = yOf(c[i]), y1 = yOf(c[i + 1]);
-    for (int x = x0; x <= x1; x += 2) {
+    int xe = (i == n - 2) ? x1 : x1 - 1;
+    for (int x = x0; x <= xe && x <= xRev; x++) {
       int y = y0 + (int)((long)(y1 - y0) * (x - x0) / max(1, x1 - x0));
-      int h = base - y;
-      if (h <= 0) continue;
-      int h1 = h / 3;
-      if (h1 > 0) gfx->drawFastVLine(x, y, h1, C_ORANGE_D);
-      if (h - h1 > 0) gfx->drawFastVLine(x, y + h1, h - h1, C_PANEL);
+      for (int k = max(0, (y - top0) / bandH); k < NB; k++) {
+        int ys = max(y + 2, top0 + k * bandH), ye = min(base, top0 + (k + 1) * bandH);
+        if (ye > ys) gfx->drawFastVLine(x, ys, ye - ys, band[k]);
+      }
     }
   }
-
-  // polyline native, 2 passes pour l'épaisseur
-  bool up = c[n - 1] >= c[0];
-  uint16_t lc = up ? C_GREEN : C_RED;
-  for (int i = 0; i < n - 1; i++) {
-    int x0 = xOf(i), y0 = yOf(c[i]);
-    int x1 = xOf(i + 1), y1 = yOf(c[i + 1]);
-    gfx->drawLine(x0, y0, x1, y1, lc);
-    gfx->drawLine(x0, y0 + 1, x1, y1 + 1, lc);
+  // courbe : lueur puis trait 2 px
+  uint16_t glow = mix565(C_PANEL, lc, 85);
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 0; i < n - 1; i++) {
+      int x0 = xOf(i), y0 = yOf(c[i]), x1 = xOf(i + 1), y1 = yOf(c[i + 1]);
+      if (x0 > xRev) break;
+      if (x1 > xRev) { y1 = y0 + (int)((long)(y1 - y0) * (xRev - x0) / max(1, x1 - x0)); x1 = xRev; }
+      if (pass == 0) { gfx->drawLine(x0, y0 - 1, x1, y1 - 1, glow); gfx->drawLine(x0, y0 + 2, x1, y1 + 2, glow); }
+      else { gfx->drawLine(x0, y0, x1, y1, lc); gfx->drawLine(x0, y0 + 1, x1, y1 + 1, lc); }
+    }
   }
-
-  // dot dernier point
-  gfx->fillCircle(xOf(n - 1), yOf(c[n - 1]), 4, lc);
-  gfx->fillCircle(xOf(n - 1), yOf(c[n - 1]), 2, C_WHITE);
+  if (kr < 1.0f) {
+    // tête lumineuse pendant le tracé
+    int i = constrain((int)((long)(xRev - GX - 4) * (n - 1) / (GW - 10)), 0, n - 2);
+    int x0 = xOf(i), x1 = xOf(i + 1);
+    int yh = yOf(c[i]) + (int)((long)(yOf(c[i + 1]) - yOf(c[i])) * (xRev - x0) / max(1, x1 - x0));
+    fxHalo(xRev, yh, 10, lc, C_PANEL, 150, 2);
+    gfx->fillCircle(xRev, yh, 3, C_WHITE);
+  } else {
+    // dernier point : onde qui pulse ("live")
+    int xl = xOf(n - 1), yl = yOf(c[n - 1]);
+    if (fxFull()) {
+      fxRing(xl, yl, 4, 20, (fxT % 1700) / 1700.0f, lc, C_PANEL);
+      fxRing(xl, yl, 4, 20, ((fxT + 850) % 1700) / 1700.0f, lc, C_PANEL);
+    }
+    gfx->fillCircle(xl, yl, 4, lc);
+    gfx->fillCircle(xl, yl, 2, C_WHITE);
+  }
 
   // curseur tactile
   if (cursorIdx >= 0 && cursorIdx < n) {
@@ -1299,14 +1641,30 @@ void drawChart() {
   gfx->setCursor(GX + 4, GY + GH - 10); gfx->print(prettyNum((long)mn));
 }
 
+unsigned long priceFlashMs = 0;       // flash vert/rouge du prix au changement
+bool priceFlashUp = true;
+
+void stepDispPrice() {
+  float target = btcPrice[curCur];
+  if (fabsf(dispPrice - target) >= 0.5f) {
+    dispPrice += (target - dispPrice) * 0.18f;
+    if (fabsf(dispPrice - target) < 0.5f) dispPrice = target;
+  }
+}
+
 void drawPagePrice() {
-  // colonne gauche : logo + prix + variation + devise
+  // colonne gauche : logo (halo pulsant + reflet) + prix + variation + devise
+  if (fxFull()) fxHalo(84, 66, 38, C_ORANGE, C_BG, (uint8_t)(35 + 45 * fxPulse(3200)), 3);
   gfx->draw16bitRGBBitmapWithTranColor(52, 34, (uint16_t*)BTC_LOGO_64, TRANSP, 64, 64);
+  if (fxFull()) fxShineBitmap(52, 34, BTC_LOGO_64, 64, 64, TRANSP, (fxT % 5200) / 1100.0f, 12, 150);
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
   gfx->setCursor(52, 104); gfx->print("BTC / " + String(CUR_LABEL[curCur]));
-  // prix en chiffres lissés (animé via dispPrice)
+  // prix en chiffres lissés (animé via dispPrice) ; flash vert/rouge au changement
   float p = (dispPrice > 0) ? dispPrice : btcPrice[curCur];
-  if (p > 0) drawSmooth(10, 118, prettyNum((long)p).c_str(), C_WHITE, C_BG);
+  uint16_t pc = C_WHITE;
+  if (fxAny() && priceFlashMs && millis() - priceFlashMs < 1400)
+    pc = mix565(priceFlashUp ? C_GREEN : C_RED, C_WHITE, u8f(easeInOut((millis() - priceFlashMs) / 1400.0f)));
+  if (p > 0) drawSmooth(10, 118, prettyNum((long)p).c_str(), pc, C_BG);
   else { gfx->setTextSize(3); gfx->setTextColor(C_WHITE); gfx->setCursor(10, 124); gfx->print("---"); }
   bool upDay = btcChg24 >= 0;
   char chg[16]; snprintf(chg, sizeof(chg), "%s%.2f%%", upDay ? "+" : "", btcChg24);
@@ -1330,76 +1688,239 @@ void drawPagePrice() {
   // onglets timeframe
   for (int i = 0; i < TF_COUNT; i++) {
     bool active = (i == curTf);
+    if (active && fxFull()) gfx->drawRoundRect(GX + i * 72 - 2, 32, 70, 26, 13, mix565(C_BG, C_ORANGE, (uint8_t)(60 + 90 * fxPulse(2000))));
     drawPill(GX + i * 72, 34, 66, 22, active ? C_ORANGE : C_PANEL, active ? C_BG : C_GREY, TF_LABEL[i], 2);
   }
   drawChart();
 }
 
 // =====================================================================
-//  PAGE 1 — ON-CHAIN
+//  PAGE 1 — ON-CHAIN (V5 : frise de blocs façon mempool.space)
+//  [bloc en attente qui se remplit] ┊ [4 derniers blocs minés]
+//  Nouveau bloc : il sort du bloc en attente et pousse la frise.
 // =====================================================================
+// couleur d'un niveau de fees (vert = pas cher -> rouge = cher)
+uint16_t feeColor(float f) {
+  if (f <= 0) return C_DGREY;
+  if (f < 4)  return mix565(C_GREEN_D, C_GREEN, u8f(f / 4));
+  if (f < 12) return mix565(C_GREEN, C_YELLOW, u8f((f - 4) / 8));
+  if (f < 30) return mix565(C_YELLOW, C_ORANGE, u8f((f - 12) / 18));
+  if (f < 80) return mix565(C_ORANGE, C_RED, u8f((f - 30) / 50));
+  return C_RED;
+}
+
+#define BLK_W   70          // face avant
+#define BLK_D   8           // profondeur 3D
+#define BLK_Y   132         // haut de la face avant
+#define BLK_X0  118         // 1er bloc miné
+#define BLK_DX  88          // pas entre blocs
+unsigned long stripAnimMs = 0;
+
+// volume 3D : dessus + flanc droit (la face avant est dessinée par l'appelant)
+void blockShell(int x, int y, int w, int d, uint16_t top, uint16_t side) {
+  gfx->fillTriangle(x, y, x + d, y - d, x + w + d, y - d, top);
+  gfx->fillTriangle(x, y, x + w + d, y - d, x + w, y, top);
+  gfx->fillTriangle(x + w, y, x + w + d, y - d, x + w + d, y + w - d, side);
+  gfx->fillTriangle(x + w, y, x + w + d, y + w - d, x + w, y + w, side);
+}
+
+void drawMinedBlock(int x, int i, long h, float fee, long tx, long ts, const char *pool, bool fresh) {
+  uint16_t base = feeColor(fee);
+  const int y = BLK_Y, w = BLK_W, d = BLK_D;
+  blockShell(x, y, w, d, mix565(base, C_WHITE, 70), mix565(C_PANEL, base, 90));
+  for (int k = 0; k < 7; k++)                                      // face avant en dégradé
+    gfx->fillRect(x, y + k * 10, w, 10, mix565(C_PANEL, base, (uint8_t)(205 - k * 14)));
+  if (fresh) gfx->drawRect(x, y, w, w, mix565(C_WHITE, C_YELLOW, u8f(fxPulse(900))));
+  gfx->setTextSize(1);
+  gfx->setTextColor(i == 0 ? C_ORANGE : C_GREY);
+  char hs[12]; snprintf(hs, sizeof(hs), "%ld", h);
+  gfx->setCursor(x + (w + d - (int)strlen(hs) * 6) / 2, 114); gfx->print(hs);
+  char fs[10]; snprintf(fs, sizeof(fs), "~%d", (int)(fee + 0.5f));
+  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+  gfx->setCursor(x + (w - (int)strlen(fs) * 12) / 2, y + 7); gfx->print(fs);
+  gfx->setTextSize(1); gfx->setTextColor(mix565(C_WHITE, base, 80));
+  gfx->setCursor(x + (w - 36) / 2, y + 26); gfx->print("sat/vB");
+  char ts2[16]; snprintf(ts2, sizeof(ts2), "%ld tx", tx);
+  gfx->setTextColor(C_WHITE);
+  gfx->setCursor(x + (w - (int)strlen(ts2) * 6) / 2, y + 42); gfx->print(ts2);
+  time_t now = time(nullptr);
+  if (ts > 0 && now > 1600000000) {
+    long m = max(0L, ((long)now - ts) / 60);
+    char ag[12]; snprintf(ag, sizeof(ag), m < 1 ? "<1 min" : "%ld min", m);
+    gfx->setTextColor(mix565(C_WHITE, base, 90));
+    gfx->setCursor(x + (w - (int)strlen(ag) * 6) / 2, y + 56); gfx->print(ag);
+  }
+  char pn[13]; strlcpy(pn, pool, sizeof(pn));
+  gfx->setTextColor(C_GREY);
+  gfx->setCursor(x + (w - (int)strlen(pn) * 6) / 2, 206); gfx->print(pn);
+}
+
+// bloc en attente : "liquide" qui monte avec le temps écoulé, vagues + bulles
+void drawPendingBlock(long el) {
+  const int x = 14, y = BLK_Y, w = BLK_W, d = BLK_D;
+  uint16_t fc = feeColor((float)feeFast);
+  blockShell(x, y, w, d, mix565(C_PANEL, fc, 60), mix565(C_BG, fc, 45));
+  gfx->fillRect(x, y, w, w, mix565(C_BG, C_PANEL, 160));
+  float lvl = el >= 0 ? 0.06f + 0.94f * clamp01(el / 600.0f) : 0.3f;
+  float t = fxFull() ? fxT / 1000.0f : 0;
+  for (int xx = 0; xx < w; xx++) {
+    float wv = sinf(xx * 0.19f + t * 3.1f) * 2.2f + sinf(xx * 0.07f - t * 1.7f) * 1.6f;
+    int top = y + w - (int)(lvl * (w - 4)) + (int)wv;
+    top = constrain(top, y + 1, y + w - 1);
+    gfx->drawFastVLine(x + xx, top, 2, mix565(fc, C_WHITE, 120));                // crête
+    for (int k = 0; k < 3; k++) {                                                  // corps en dégradé
+      int ys = max(top + 2, y + w - (int)((w - 2) * (3 - k) / 3.0f)), ye = y + w - (int)((w - 2) * (2 - k) / 3.0f);
+      if (ye > ys) gfx->drawFastVLine(x + xx, ys, ye - ys, mix565(C_PANEL, fc, (uint8_t)(120 + k * 45)));
+    }
+  }
+  if (fxFull()) {                                                                  // bulles
+    for (int k = 0; k < 6; k++) {
+      float ph = fmodf(t * (0.35f + k * 0.07f) + k * 0.37f, 1.0f);
+      int bx = x + 8 + (k * 11) % (w - 16) + (int)(sinf(t * 2 + k) * 3);
+      int by = y + w - 4 - (int)(ph * lvl * (w - 8));
+      if (by > y + w - (int)(lvl * (w - 4)) + 3) gfx->drawCircle(bx, by, 1 + k % 2, mix565(fc, C_WHITE, 170));
+    }
+  }
+  gfx->drawRect(x, y, w, w, mix565(C_BG, C_ORANGE, u8f(fxFull() ? 0.45f + 0.55f * fxPulse(1400) : 1.0f)));
+  // textes
+  char fs[10]; snprintf(fs, sizeof(fs), "~%d", feeFast);
+  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+  gfx->setCursor(x + (w - (int)strlen(fs) * 12) / 2, y + 7); gfx->print(fs);
+  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+  gfx->setCursor(x + (w - 36) / 2, y + 26); gfx->print("sat/vB");
+  long lam = lambdaEpoch > 0 ? lambdaEpoch : 600;
+  long rem = el >= 0 ? max(0L, (lam - el) / 60) : -1;
+  char rs[14];
+  if (rem < 0) strlcpy(rs, "...", sizeof(rs));
+  else if (rem == 0) strlcpy(rs, "imminent", sizeof(rs));
+  else snprintf(rs, sizeof(rs), "~%ld min", rem);
+  gfx->setTextColor(C_WHITE);
+  gfx->setCursor(x + (w - (int)strlen(rs) * 6) / 2, y + 44); gfx->print(rs);
+  gfx->setTextColor(C_ORANGE);
+  gfx->setCursor(x + (w + d - 48) / 2, 114); gfx->print("prochain");
+  gfx->setTextColor(C_GREY);
+  gfx->setCursor(x + (w - 42) / 2, 206); gfx->print("mempool");
+}
+
 void drawPageChain() {
-  // bloc
+  // ---------- snapshot frise ----------
+  long sH[STRIP_N], sTx[STRIP_N], sTs[STRIP_N]; float sFee[STRIP_N]; char sPool[STRIP_N][14]; int sn;
+  portENTER_CRITICAL(&dataMux);
+  sn = stripN;
+  memcpy(sH, stripH, sizeof(sH)); memcpy(sTx, stripTx, sizeof(sTx)); memcpy(sTs, stripTs, sizeof(sTs));
+  memcpy(sFee, stripFee, sizeof(sFee)); memcpy(sPool, stripPool, sizeof(sPool));
+  portEXIT_CRITICAL(&dataMux);
+  static long lastTop = 0;
+  if (sn > 0 && sH[0] != lastTop) { if (lastTop != 0) stripAnimMs = fxT; lastTop = sH[0]; }
+  float ka = fxFull() && stripAnimMs ? easeOutCubic((long)(fxT - stripAnimMs) / 800.0f) : 1.0f;
+  long el = secsSinceBlock();
+
+  // ---------- hauteur + chrono ----------
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
-  gfx->setCursor(12, 36); gfx->print("BLOCK HEIGHT");
-  if (blockHeight > 0) drawSmooth(10, 50, String(blockHeight).c_str(), C_WHITE, C_BG);
+  gfx->setCursor(12, 34); gfx->print("BLOCK HEIGHT");
+  uint16_t hc = ka < 1.0f ? mix565(C_ORANGE, C_WHITE, u8f(ka)) : C_WHITE;
+  if (blockHeight > 0) drawSmooth(10, 44, String(blockHeight).c_str(), hc, C_BG);
   else { gfx->setTextSize(5); gfx->setTextColor(C_WHITE); gfx->setCursor(10, 50); gfx->print("------"); }
-  unsigned long el = blockDetectedMs ? (millis() - blockDetectedMs) / 1000 : 0;
   char pool[32]; long btx; snapLastBlock(pool, sizeof(pool), &btx);
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(12, 96);
-  gfx->printf("il y a %lum%02lus  ·  %s  ·  %ld tx", el / 60, el % 60, pool, btx);
-  int prog = constrain((int)(el * 280 / 600), 0, 280);
-  gfx->fillRoundRect(10, 108, 280, 8, 4, C_PANEL);
-  if (prog > 6) gfx->fillRoundRect(10, 108, prog, 8, 4, C_ORANGE);
+  gfx->setCursor(12, 90);
+  // FIX : séparateurs ASCII (le "·" UTF-8 s'affichait en glyphes parasites)
+  if (el >= 0) gfx->printf("il y a %ldm%02lds  -  %s  -  %ld tx", el / 60, el % 60, pool, btx);
+  else gfx->print("en attente des donnees...");
+  float kp = el >= 0 ? el / 600.0f : 0;
+  fxBar(10, 102, 286, 6, kp, kp > 1 ? C_RED : C_ORANGE, C_PANEL);
 
-  // colonne droite : mempool + halving
-  gfx->fillRoundRect(306, 34, 164, 84, 8, C_PANEL);
+  // ---------- mempool (droite) ----------
+  gfx->fillRoundRect(306, 32, 164, 76, 8, C_PANEL);
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(316, 42); gfx->print("MEMPOOL");
+  gfx->setCursor(316, 40); gfx->print("MEMPOOL");
   gfx->setTextSize(3); gfx->setTextColor(C_WHITE);
-  gfx->setCursor(316, 56); gfx->print(prettyNum(mempoolCount));
+  gfx->setCursor(316, 52); gfx->print(prettyNum(mempoolCount));
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(316, 82); gfx->print("TX en attente");
-  long daysH = (1050000L - blockHeight) * 10L / 1440L;
-  gfx->setCursor(316, 98); gfx->printf("halving ~%ld j", daysH);
+  gfx->setCursor(316, 80); gfx->print("TX en attente");
+  if (fxFull()) {                                   // flux de transactions vers le bloc en attente
+    for (int k = 0; k < 14; k++) {
+      int px = 460 - (int)(((fxT / 12) + k * 23) % 146);
+      gfx->fillRect(px, 96, 2 + (k % 3), 2, mix565(C_PANEL, feeColor((float)feeFast), (uint8_t)(90 + (k * 37) % 150)));
+    }
+  } else gfx->drawFastHLine(316, 97, 144, C_LINE);
 
-  // fees
-  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(12, 132); gfx->print("FEES sat/vB");
-  const char* fl[4] = {"rapide", "30min", "1h", "eco"};
+  // ---------- frise ----------
+  // séparateur "maintenant" : pointillés qui défilent
+  int dash = fxFull() ? (int)((fxT / 60) % 8) : 0;
+  for (int y = 112 + dash; y < 214; y += 8) gfx->drawFastVLine(104, y, 4, C_GREY);
+  int off = (int)((1.0f - ka) * BLK_DX);
+  for (int i = min(sn, STRIP_N) - 1; i >= 0; i--)
+    drawMinedBlock(BLK_X0 + i * BLK_DX - off, i, sH[i], sFee[i], sTx[i], sTs[i], sPool[i], i == 0 && ka < 1.0f);
+  if (sn == 0) {
+    gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+    gfx->setCursor(BLK_X0 + 90, 164); gfx->print("chargement des blocs...");
+  }
+  drawPendingBlock(el);
+
+  // ---------- fees ----------
+  const char* fl[4] = {"rapide", "30 min", "1 h", "eco"};
   int fv[4] = {feeFast, feeHalf, feeHour, feeEco};
+  int fmax = max(1, feeFast);
   for (int i = 0; i < 4; i++) {
-    int fx = 10 + i * 78;
-    gfx->fillRoundRect(fx, 144, 72, 36, 6, C_PANEL);
+    int fx = 10 + i * 116, fy = 216;
+    uint16_t c = feeColor((float)fv[i]);
+    gfx->fillRoundRect(fx, fy, 110, 34, 6, C_PANEL);
+    gfx->fillRoundRect(fx, fy + 4, 3, 26, 1, c);
     gfx->setTextSize(2); gfx->setTextColor(i == 0 ? C_ORANGE : C_WHITE);
-    gfx->setCursor(fx + 8, 148); gfx->print(fv[i] > 0 ? String(fv[i]) : "-");
+    gfx->setCursor(fx + 10, fy + 5);
+    String v = fv[i] > 0 ? String(fv[i]) : String("-");
+    gfx->print(v);
     gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-    gfx->setCursor(fx + 8, 166); gfx->print(fl[i]);
+    gfx->setCursor(fx + 14 + v.length() * 12, fy + 11); gfx->print("sat/vB");
+    gfx->setCursor(fx + 10, fy + 24); gfx->print(fl[i]);
+    int bh = (int)(24 * clamp01(fv[i] / (float)fmax) * fxEnter(700, i * 90));
+    gfx->fillRoundRect(fx + 96, fy + 5, 6, 24, 2, C_BG);
+    if (bh > 1) gfx->fillRoundRect(fx + 96, fy + 29 - bh, 6, bh, 2, c);
   }
 
-  // difficulté
+  // ---------- difficulté / halving / whale ----------
+  gfx->fillRoundRect(10, 256, 150, 34, 6, C_PANEL);
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(12, 196);
-  gfx->printf("ajustement difficulte : %ld blocs", diffRemaining);
-  gfx->setCursor(12, 210);
-  gfx->setTextColor(diffChange >= 0 ? C_GREEN : C_RED);
-  gfx->printf("estimation %s%.2f %%", diffChange >= 0 ? "+" : "", diffChange);
+  gfx->setCursor(18, 261); gfx->print("DIFFICULTE");
+  gfx->setTextSize(2); gfx->setTextColor(diffChange >= 0 ? C_GREEN : C_RED);
+  gfx->setCursor(18, 272); gfx->printf("%s%.1f%%", diffChange >= 0 ? "+" : "", diffChange);
+  gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
+  gfx->setCursor(94, 261); gfx->printf("%ld", diffRemaining);
+  gfx->setCursor(94, 277); gfx->print("blocs");
 
-  // whale
-  gfx->fillRoundRect(10, 234, 460, 56, 8, C_PANEL);
+  // FIX : halving calculé (l'ancien 1 050 000 en dur devenait négatif après 2028)
+  gfx->fillRoundRect(166, 256, 148, 34, 6, C_PANEL);
+  gfx->setTextColor(C_GREY); gfx->setCursor(174, 261); gfx->print("HALVING");
+  if (blockHeight > 0) {
+    long nextH = (blockHeight / 210000L + 1) * 210000L;
+    long daysH = (nextH - blockHeight) * 10L / 1440L;
+    gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+    gfx->setCursor(174, 272); gfx->printf("%ldj", daysH);
+    fxBar(240, 276, 66, 6, (blockHeight % 210000L) / 210000.0f * fxEnter(900), C_ORANGE, C_BG);
+    gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
+    gfx->setCursor(240, 262); gfx->printf("#%ld", nextH / 1000);
+    gfx->print("k");
+  }
+
+  gfx->fillRoundRect(320, 256, 150, 34, 6, C_PANEL);
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
-  gfx->setCursor(20, 242); gfx->print("WHALE WATCH (mempool)");
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
-  gfx->setCursor(20, 258);
-  if (whaleBtc >= 50) gfx->printf("%.1f BTC en transit !", whaleBtc);
-  else gfx->print("calme plat...");
+  gfx->setCursor(328, 261); gfx->print("WHALE WATCH");
+  if (whaleBtc >= 50) {
+    if (fxFull()) fxRing(456, 266, 2, 9, (fxT % 1500) / 1500.0f, C_ORANGE, C_PANEL);
+    gfx->fillCircle(456, 266, 3, C_ORANGE);
+    gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+    gfx->setCursor(328, 272); gfx->printf("%.1f", whaleBtc);
+    gfx->setTextSize(1); gfx->setTextColor(C_GREY); gfx->print(" BTC");
+  } else {
+    gfx->setTextColor(C_GREY); gfx->setCursor(328, 276); gfx->print("calme plat...");
+  }
 }
 
 // =====================================================================
 //  PAGE 5 — NŒUD & SENTIMENT
 // =====================================================================
-void drawGauge(int cx, int cy, int r, int value) {
+void drawGauge(int cx, int cy, int r, float value) {
   // segments pleins (quads triangulaires) : aucune strie, rendu net et rapide
   const uint16_t segC[5] = {C_RED, C_ORANGE, C_YELLOW, C_GREEN, C_GREEN_D};
   int r0 = r - 15, r1 = r;
@@ -1417,9 +1938,17 @@ void drawGauge(int cx, int cy, int r, int value) {
       gfx->fillTriangle(x0a, y0a, x1b, y1b, x0b, y0b, segC[seg]);
     }
   }
-  // aiguille épaisse (3 lignes) + moyeu
+  // graduations 0 / 25 / 50 / 75 / 100
+  for (int g = 0; g <= 4; g++) {
+    float a = PI - g * PI / 4;
+    gfx->drawLine(cx + (int)(cosf(a) * (r + 3)), cy - (int)(sinf(a) * (r + 3)),
+                  cx + (int)(cosf(a) * (r + 8)), cy - (int)(sinf(a) * (r + 8)), C_GREY);
+  }
+  value = constrain(value, 0.0f, 100.0f);
+  // aiguille épaisse (3 lignes) + moyeu + pointe lumineuse
   float ang = PI - (value / 100.0f) * PI;
   int nx = cx + (int)(cosf(ang) * (r - 26)), ny = cy - (int)(sinf(ang) * (r - 26));
+  if (fxFull()) fxHalo(nx, ny, 7, C_WHITE, C_BG, 110, 2);
   gfx->drawLine(cx, cy, nx, ny, C_WHITE);
   gfx->drawLine(cx + 1, cy, nx + 1, ny, C_WHITE);
   gfx->drawLine(cx, cy + 1, nx, ny + 1, C_WHITE);
@@ -1431,7 +1960,10 @@ void drawPageNode() {
   // Fear & Greed
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
   gfx->setCursor(20, 36); gfx->print("FEAR & GREED INDEX");
-  drawGauge(110, 170, 92, fngValue >= 0 ? fngValue : 50);
+  // aiguille à ressort : part de 0 et dépasse légèrement avant de se poser
+  float gv = fngValue >= 0 ? fngValue : 50;
+  if (fxFull()) gv = gv * easeOutBack((long)(fxT - pageEnterMs) / 1400.0f);
+  drawGauge(110, 170, 92, gv);
   // valeur + label centrés sur l'axe de la jauge (cx=110), pas sur l'écran
   String fv = fngValue >= 0 ? String(fngValue) : "-";
   drawSmooth(110 - smoothWidth(fv.c_str()) / 2, 176, fv.c_str(), C_WHITE, C_BG);
@@ -1443,7 +1975,12 @@ void drawPageNode() {
   gfx->fillRoundRect(236, 34, 234, 120, 8, C_PANEL);
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
   gfx->setCursor(248, 44); gfx->print("MON NOEUD UMBREL");
-  gfx->fillCircle(252, 74, 5, nodeOnline ? C_GREEN : C_RED);
+  if (nodeOnline && fxFull()) {                       // ping radar
+    fxRing(252, 74, 5, 11, (fxT % 1800) / 1800.0f, C_GREEN, C_PANEL);
+    fxRing(252, 74, 5, 11, ((fxT + 900) % 1800) / 1800.0f, C_GREEN, C_PANEL);
+  }
+  bool dotOn = nodeOnline || !fxFull() || (fxT / 500) % 2 == 0;   // hors ligne : clignote
+  gfx->fillCircle(252, 74, 5, dotOn ? (nodeOnline ? C_GREEN : C_RED) : C_PANEL);
   gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
   gfx->setCursor(266, 66); gfx->print(nodeOnline ? "en ligne" : "hors ligne");
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
@@ -1488,10 +2025,11 @@ int      settledCount = 0;
 uint8_t  cubeState = CS_FILL;
 unsigned long cubeSeqMs = 0;
 float    cubeOffX = 0, cubeLift = 0, cubeTilt = 0;
+float    cubeSpin = 0;                // V5 : rotation lente permanente (lacet)
 
-// projection 3D -> 2D isométrique (+ tilt pendant le drag)
+// projection 3D -> 2D isométrique (+ tilt pendant le drag, + rotation lente)
 void cubeProj(float x, float y, float z, int &sx, int &sy) {
-  float c = cosf(cubeTilt), s = sinf(cubeTilt);
+  float c = cosf(cubeTilt + cubeSpin), s = sinf(cubeTilt + cubeSpin);
   float xr = x * c - y * s, yr = x * s + y * c;
   sx = (int)(CUBE_CX + cubeOffX + (xr - yr) * 0.866f);
   sy = (int)(CUBE_CY - cubeLift + (xr + yr) * 0.433f - z);
@@ -1615,7 +2153,11 @@ void cubeDrawParticles() {
     if (p.state == PS_SET) {   // position recalculée (le cube peut bouger)
       float fx, fy, fz; slotPos(p.slot, fx, fy, fz);
       cubeProj(fx, fy, fz, px, py);
-      gfx->fillRect(px, py, 2, 2, (p.slot % 5 == 0) ? C_YELLOW : C_ORANGE);
+      // couleur par couche : braise en bas -> jaune en haut (+ scintillement)
+      uint8_t lay = p.slot / 36;
+      uint16_t pc = mix565(C_ORANGE_D, C_YELLOW, (uint8_t)(lay * 46));
+      if (fxFull() && ((p.slot * 7 + fxT / 90) % 23) == 0) pc = C_WHITE;
+      gfx->fillRect(px, py, 2, 2, pc);
     } else {
       px = (int)p.x; py = (int)p.y;
       gfx->fillRect(px, py, 2, 2, p.state == PS_ESC ? C_ORANGE_D : C_ORANGE);
@@ -1674,6 +2216,28 @@ void drawPageCube() {
   }
   cubeUpdateEsc();
 
+  // ---- rotation lente permanente (MAX) ----
+  static unsigned long lastSpin = 0;
+  if (fxFull()) { float dt = lastSpin ? min(0.1f, (now - lastSpin) / 1000.0f) : 0; cubeSpin += dt * 0.32f; if (cubeSpin > 2 * PI) cubeSpin -= 2 * PI; }
+  lastSpin = now;
+
+  // ---- sol isométrique (grille qui tourne avec le cube, reste en place au drag) ----
+  {
+    float c = cosf(cubeSpin), sn = sinf(cubeSpin);
+    auto fp = [&](float x, float y, int &sx, int &sy) {
+      float xr = x * c - y * sn, yr = x * sn + y * c;
+      sx = (int)(CUBE_CX + (xr - yr) * 0.866f); sy = (int)(CUBE_CY + (xr + yr) * 0.433f + 2);
+    };
+    for (int g = -4; g <= 4; g++) {
+      int ax, ay, bx, by;
+      uint8_t k = (uint8_t)(70 - abs(g) * 12);
+      fp(g * 22.0f, -88, ax, ay); fp(g * 22.0f, 88, bx, by); gfx->drawLine(ax, ay, bx, by, mix565(C_BG, C_ORANGE_D, k));
+      fp(-88, g * 22.0f, ax, ay); fp(88, g * 22.0f, bx, by); gfx->drawLine(ax, ay, bx, by, mix565(C_BG, C_ORANGE_D, k));
+    }
+    // ombre douce sous le cube
+    if (cubeState == CS_FILL) fxHalo(CUBE_CX, CUBE_CY + 4, 34, C_ORANGE_D, C_BG, 70, 4);
+  }
+
   // ---- dessin ----
   cubeDrawEdges();
   cubeDrawParticles();
@@ -1721,7 +2285,7 @@ void drawPagePools() {
   portEXIT_CRITICAL(&dataMux);
 
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
-  gfx->setCursor(12, 36); gfx->print("POOLS WAR — blocs mines sur 7 jours");
+  gfx->setCursor(12, 36); gfx->print("POOLS WAR - blocs mines sur 7 jours");
   gfx->setTextColor(C_GREY);
   gfx->setCursor(360, 36);
   if (total > 0) gfx->printf("total %ld", total);
@@ -1745,20 +2309,46 @@ void drawPagePools() {
     poolShown[i] += (target - poolShown[i]) * 0.15f;
     if (fabsf(target - poolShown[i]) > 1.0f) moving = true;
     int w = (int)poolShown[i];
-    // nom (12 chars max)
-    char nm[13]; strlcpy(nm, names[i], sizeof(nm));
-    gfx->setTextSize(1); gfx->setTextColor(i == 0 ? C_ORANGE : C_WHITE);
-    gfx->setCursor(10, y + 6); gfx->print(nm);
-    // piste + barre animée
+    float prog = target > 0 ? clamp01(poolShown[i] / target) : 1.0f;
+    // médaille de rang (or / argent / bronze)
+    const uint16_t medal[3] = {C_YELLOW, 0xC618, 0xCB00};
+    uint16_t mc = i < 3 ? medal[i] : C_PANEL;
+    if (i == 0 && fxFull()) fxHalo(17, y + 10, 12, C_YELLOW, C_BG, (uint8_t)(40 + 50 * fxPulse(1800)), 3);
+    gfx->fillCircle(17, y + 10, 8, mc);
+    gfx->setTextSize(1); gfx->setTextColor(i < 3 ? C_BG : C_GREY);
+    gfx->setCursor(15, y + 7); gfx->print(i + 1);
+    if (i == 0) {                                           // couronne
+      gfx->fillTriangle(10, y - 3, 12, y - 8, 14, y - 3, C_YELLOW);
+      gfx->fillTriangle(14, y - 3, 17, y - 10, 20, y - 3, C_YELLOW);
+      gfx->fillTriangle(20, y - 3, 22, y - 8, 24, y - 3, C_YELLOW);
+    }
+    // nom (16 chars max)
+    char nm[17]; strlcpy(nm, names[i], sizeof(nm));
+    gfx->setTextColor(i == 0 ? C_ORANGE : C_WHITE);
+    gfx->setCursor(32, y + 6); gfx->print(nm);
+    // piste + barre : reflet haut, dégradé, bande lumineuse qui défile
     gfx->fillRoundRect(140, y, 272, 20, 5, C_PANEL);
-    if (w > 8) gfx->fillRoundRect(140, y, w, 20, 5, POOL_COL[i]);
-    // marqueur #1 : petit pic orange au-dessus de la barre
-    if (i == 0) gfx->fillTriangle(146, y - 2, 152, y - 8, 158, y - 2, C_ORANGE);
-    // nb blocs + part
+    if (w > 8) {
+      uint16_t bc = POOL_COL[i];
+      gfx->fillRoundRect(140, y, w, 20, 5, mix565(bc, C_BG, 60));
+      gfx->fillRoundRect(140, y, w, 11, 5, bc);
+      gfx->drawFastHLine(144, y + 2, max(0, w - 8), mix565(bc, C_WHITE, 120));
+      if (fxFull()) {
+        int sx = 140 + (int)(((fxT + i * 260) % 2600) / 2600.0f * (w + 60)) - 30;
+        for (int k = 0; k < 18; k++) {
+          int xx = sx + k;
+          if (xx < 143 || xx > 140 + w - 4) continue;
+          gfx->drawFastVLine(xx, y + 2, 16, mix565(bc, C_WHITE, (uint8_t)(130 - abs(k - 9) * 14)));
+        }
+      }
+      // tête de course lumineuse
+      gfx->fillCircle(140 + w - 4, y + 10, 3, mix565(bc, C_WHITE, 150));
+    }
+    // nb blocs + part (compteur qui monte avec la barre)
     gfx->setTextColor(C_GREY);
     gfx->setCursor(420, y + 6);
     int share = total > 0 ? (int)(blocks[i] * 100 / total) : 0;
-    gfx->printf("%ld %d%%", blocks[i], share);
+    gfx->printf("%ld %d%%", (long)(blocks[i] * prog + 0.5f), (int)(share * prog + 0.5f));
   }
   if (moving) poolsAnimUntil = millis() + 250;   // laisser les barres finir leur course
 }
@@ -1778,6 +2368,81 @@ void drawLnTile(int x, int y, const char *label, const String &val, const char *
   }
 }
 
+// ---- mini réseau Lightning animé : nœuds, canaux, paiements routés ----
+#define LN_NN 14
+#define LN_NE 24
+#define LN_NP 8
+struct LnNode { int16_t x, y; unsigned long hitMs; };
+struct LnPay  { int8_t e; bool fwd; float p, v; };
+LnNode  lnN[LN_NN];
+uint8_t lnE[LN_NE][2];
+int     lnNE = 0;
+LnPay   lnP[LN_NP];
+bool    lnInit = false;
+uint32_t lnRnd = 0x1234567;
+int lnRand(int n) { lnRnd = lnRnd * 1664525u + 1013904223u; return (int)((lnRnd >> 8) % (uint32_t)n); }
+
+void lnNetInit() {
+  for (int i = 0; i < LN_NN; i++) {                  // grille 5x3 bruitée (x 232..462, y 38..118)
+    int gx = i % 5, gy = i / 5;
+    lnN[i].x = 238 + gx * 55 + lnRand(22) - 11;
+    lnN[i].y = 44 + gy * 34 + lnRand(16) - 8 + (gx % 2) * 8;
+    lnN[i].hitMs = 0;
+  }
+  lnNE = 0;
+  for (int i = 0; i < LN_NN && lnNE < LN_NE; i++) {   // chaque nœud -> ses 2 plus proches voisins
+    for (int pass = 0; pass < 2; pass++) {
+      int best = -1; long bd = 1L << 30;
+      for (int j = 0; j < LN_NN; j++) {
+        if (j == i) continue;
+        bool dup = false;
+        for (int e = 0; e < lnNE; e++) if ((lnE[e][0] == i && lnE[e][1] == j) || (lnE[e][0] == j && lnE[e][1] == i)) dup = true;
+        if (dup) continue;
+        long dx = lnN[i].x - lnN[j].x, dy = lnN[i].y - lnN[j].y, d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (best >= 0 && lnNE < LN_NE) { lnE[lnNE][0] = i; lnE[lnNE][1] = best; lnNE++; }
+    }
+  }
+  for (int k = 0; k < LN_NP; k++) { lnP[k].e = lnRand(lnNE); lnP[k].fwd = lnRand(2); lnP[k].p = lnRand(100) / 100.0f; lnP[k].v = 0.7f + lnRand(80) / 100.0f; }
+  lnInit = true;
+}
+
+void lnNetDraw() {
+  if (!lnInit) lnNetInit();
+  static unsigned long last = 0;
+  float dt = (fxFull() && last) ? min(0.1f, (fxT - last) / 1000.0f) : 0; last = fxT;
+  for (int e = 0; e < lnNE; e++)
+    gfx->drawLine(lnN[lnE[e][0]].x, lnN[lnE[e][0]].y, lnN[lnE[e][1]].x, lnN[lnE[e][1]].y, mix565(C_BG, C_YELLOW, 38));
+  for (int k = 0; k < LN_NP; k++) {
+    LnPay &p = lnP[k];
+    p.p += p.v * dt;
+    if (p.p >= 1.0f) {                                  // arrivé : le nœud s'allume, on route au saut suivant
+      int end = p.fwd ? lnE[p.e][1] : lnE[p.e][0];
+      lnN[end].hitMs = fxT;
+      int cand[LN_NE], nc = 0;
+      for (int e = 0; e < lnNE; e++) if ((lnE[e][0] == end || lnE[e][1] == end) && e != p.e) cand[nc++] = e;
+      if (nc) { p.e = cand[lnRand(nc)]; p.fwd = (lnE[p.e][0] == end); } else p.fwd = !p.fwd;
+      p.p = 0;
+    }
+    const LnNode &a = lnN[p.fwd ? lnE[p.e][0] : lnE[p.e][1]], &b = lnN[p.fwd ? lnE[p.e][1] : lnE[p.e][0]];
+    for (int t = 3; t >= 0; t--) {                      // traînée
+      float q = max(0.0f, p.p - t * 0.06f);
+      int x = a.x + (int)((b.x - a.x) * q), y = a.y + (int)((b.y - a.y) * q);
+      if (t == 0) { gfx->fillCircle(x, y, 2, C_YELLOW); gfx->drawPixel(x, y, C_WHITE); }
+      else gfx->fillRect(x, y, 2, 2, mix565(C_BG, C_YELLOW, (uint8_t)(200 - t * 55)));
+    }
+  }
+  for (int i = 0; i < LN_NN; i++) {
+    unsigned long age = fxT - lnN[i].hitMs;
+    if (lnN[i].hitMs && age < 450) {
+      float k = age / 450.0f;
+      fxRing(lnN[i].x, lnN[i].y, 3, 11, k, C_YELLOW, C_BG);
+      gfx->fillCircle(lnN[i].x, lnN[i].y, 3, mix565(C_YELLOW, C_ORANGE, u8f(k)));
+    } else gfx->fillCircle(lnN[i].x, lnN[i].y, 3, mix565(C_BG, C_ORANGE, 170));
+  }
+}
+
 void drawPageLightning() {
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
   gfx->setCursor(12, 36); gfx->print("LIGHTNING NETWORK");
@@ -1791,25 +2456,31 @@ void drawPageLightning() {
   gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
   gfx->setCursor(26, 100); gfx->print("capacite totale du reseau");
 
-  // éclair stylé : polygone plein + ombre portée + contour + reflet
+  // réseau animé derrière l'éclair
+  lnNetDraw();
+  // éclair stylé : halo pulsant + polygone plein + ombre portée + contour + reflet
   static const int8_t bolt[7][2] = {{18,0},{40,0},{24,29},{35,29},{5,71},{13,37},{3,37}};
   const int bx = 330, by = 44;
+  if (fxFull()) fxHalo(bx + 21, by + 36, 44, C_YELLOW, C_BG, (uint8_t)(45 + 55 * fxPulse(1300)), 4);
+  bool flick = fxFull() && ((fxT / 60) % 41 == 0 || (fxT / 60) % 41 == 2);   // éclat bref
   auto px = [&](int i) { return bx + bolt[i][0]; };
   auto py = [&](int i) { return by + bolt[i][1]; };
   for (int i = 1; i < 6; i++)                       // ombre portée
     gfx->fillTriangle(px(0)+3, py(0)+3, px(i)+3, py(i)+3, px(i+1)+3, py(i+1)+3, C_ORANGE_D);
-  for (int i = 1; i < 6; i++)                       // corps jaune
-    gfx->fillTriangle(px(0), py(0), px(i), py(i), px(i+1), py(i+1), C_YELLOW);
+  for (int i = 1; i < 6; i++)                       // corps jaune (blanc pendant l'éclat)
+    gfx->fillTriangle(px(0), py(0), px(i), py(i), px(i+1), py(i+1), flick ? C_WHITE : C_YELLOW);
   for (int i = 0; i < 7; i++)                       // contour orange
     gfx->drawLine(px(i), py(i), px((i+1)%7), py((i+1)%7), C_ORANGE);
   gfx->drawLine(px(6), py(6), px(0), py(0), C_WHITE); // reflets
   gfx->drawLine(px(0), py(0), px(1), py(1), C_WHITE);
 
   // tuiles stats
-  drawLnTile(24, 132, "CHANNELS", prettyNum(lnChannels), NULL);
-  drawLnTile(252, 132, "NODES", prettyNum(lnNodes), NULL);
-  drawLnTile(24, 212, "CAPACITE MOYENNE", prettyNum(lnAvgCap), "sats");
-  drawLnTile(252, 212, "FEE RATE MOYEN", String(lnAvgFeePpm), "ppm");
+  // compteurs qui montent à l'arrivée sur la page
+  float ke = fxEnter(1100);
+  drawLnTile(24, 132, "CHANNELS", prettyNum((long)(lnChannels * ke)), NULL);
+  drawLnTile(252, 132, "NODES", prettyNum((long)(lnNodes * ke)), NULL);
+  drawLnTile(24, 212, "CAPACITE MOYENNE", prettyNum((long)(lnAvgCap * ke)), "sats");
+  drawLnTile(252, 212, "FEE RATE MOYEN", String((int)(lnAvgFeePpm * ke)), "ppm");
 }
 
 // =====================================================================
@@ -1834,7 +2505,9 @@ void drawPageAI() {
   portEXIT_CRITICAL(&dataMux);
   time_t nowT = time(nullptr);
   if (n >= 2 && nowT > 1000000000) {
-    long lambda = constrain((ts[0] - ts[n - 1]) / (n - 1), 60, 3600);
+    // λ : rythme mesuré sur l'époque de difficulté si dispo (x5 plus stable),
+    // sinon moyenne des 6 derniers blocs
+    long lambda = lambdaEpoch > 0 ? lambdaEpoch : constrain((ts[0] - ts[n - 1]) / (n - 1), 60L, 3600L);
     long el = max(0L, (long)nowT - ts[0]);
     long rem = lambda - el;
     char est[16];
@@ -1843,17 +2516,17 @@ void drawPageAI() {
     int ew = drawSmooth(20, 66, est, rem >= 0 ? C_GREEN : C_ORANGE, C_PANEL);
     gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
     gfx->setCursor(24 + ew, 92); gfx->print(rem >= 0 ? "min est." : "min retard");
-    int prog = constrain((int)(el * 196 / lambda), 0, 196);
-    gfx->fillRoundRect(20, 116, 196, 8, 4, C_BG);
-    if (prog > 6) gfx->fillRoundRect(20, 116, prog, 8, 4, rem >= 0 ? C_ORANGE : C_RED);
-    gfx->setTextColor(C_GREY);
-    gfx->setCursor(20, 132); gfx->printf("rythme reel ~%ld min (%d blocs)", lambda / 60, n);
+    fxBar(20, 116, 196, 8, (float)el / lambda, rem >= 0 ? C_ORANGE : C_RED, C_BG);
+    gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+    gfx->setCursor(20, 132);
+    if (lambdaEpoch > 0) gfx->printf("rythme epoque ~%ld:%02ld /bloc", lambda / 60, lambda % 60);
+    else gfx->printf("rythme reel ~%ld min (%d blocs)", lambda / 60, n);
     // probabilités Poisson : P(au moins 1 bloc) dans 1 / 5 / 10 min
     gfx->setCursor(20, 150); gfx->print("P(bloc) :  1m    5m    10m");
     const int pm[3] = {60, 300, 600};
     for (int i = 0; i < 3; i++) {
       float pr = 1.0f - expf(-(float)pm[i] / lambda);
-      int bw = (int)(44 * pr);
+      int bw = (int)(44 * pr * fxEnter(800, i * 150));
       gfx->fillRoundRect(58 + i * 48, 162, 44, 10, 4, C_BG);
       if (bw > 5) gfx->fillRoundRect(58 + i * 48, 162, bw, 10, 4, pr > 0.63f ? C_GREEN : C_ORANGE);
       gfx->setTextColor(C_DGREY);
@@ -1898,8 +2571,8 @@ void drawPageAI() {
     gfx->setTextColor(C_GREY); gfx->setCursor(256, 100); gfx->print("collecte...");
   }
   // cycles appris : créneau actuel vs norme + prochain creux
-  struct tm t;
-  if (getLocalTime(&t, 50)) {
+  struct tm t = gTm;
+  if (gTmOk) {
     int b0 = constrain(t.tm_wday * 24 + t.tm_hour, 0, 167);
     float norm;
     portENTER_CRITICAL(&dataMux);
@@ -1932,23 +2605,25 @@ void drawPageAI() {
 
   // ---------- panneau 3 : cycles de fees sur 24 h (aujourd'hui) ----------
   gfx->fillRoundRect(10, 196, 460, 94, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(20, 204); gfx->print("CYCLES DE FEES — 24 h apprises");
+  gfx->setTextColor(C_GREY); gfx->setCursor(20, 204); gfx->print("CYCLES DE FEES - 24 h apprises");
   gfx->setTextColor(C_DGREY); gfx->setCursor(220, 204); gfx->print("(barre orange = maintenant)");
-  if (getLocalTime(&t, 50) && feeSamples > 40) {
+  if (gTmOk && feeSamples > 40) {
     float day[24]; float mx = 1;
     portENTER_CRITICAL(&dataMux);
     for (int i = 0; i < 24; i++) { day[i] = feeBkt[t.tm_wday * 24 + i]; if (day[i] > mx) mx = day[i]; }
     portEXIT_CRITICAL(&dataMux);
     if (mx > 1) {
       for (int i = 0; i < 24; i++) {
-        int bh = day[i] > 0 ? (int)(40 * day[i] / mx) : 2;
-        gfx->fillRect(22 + i * 19, 272 - bh, 14, bh, i == t.tm_hour ? C_ORANGE : C_DGREY);
+        int bh = day[i] > 0 ? (int)(40 * day[i] / mx * fxEnter(700, i * 25)) : 2;
+        if (bh < 2) bh = 2;
+        uint16_t bc = i == t.tm_hour ? mix565(C_ORANGE, C_YELLOW, u8f(fxFull() ? fxPulse(1200) : 0)) : C_DGREY;
+        gfx->fillRect(15 + i * 19, 272 - bh, 14, bh, bc);
       }
-      gfx->drawFastHLine(22, 272, 24 * 19 - 5, C_GREY);
+      gfx->drawFastHLine(15, 272, 24 * 19 - 5, C_GREY);
       gfx->setTextColor(C_DGREY); gfx->setTextSize(1);
-      gfx->setCursor(22, 278); gfx->print("0h");
-      gfx->setCursor(22 + 11 * 19, 278); gfx->print("11h");
-      gfx->setCursor(22 + 22 * 19, 278); gfx->print("22h");
+      gfx->setCursor(15, 278); gfx->print("0h");
+      gfx->setCursor(15 + 11 * 19, 278); gfx->print("11h");
+      gfx->setCursor(15 + 22 * 19, 278); gfx->print("22h");
     } else {
       gfx->setTextColor(C_GREY); gfx->setCursor(20, 240); gfx->print("pas encore de donnees pour ce jour");
     }
@@ -1957,6 +2632,10 @@ void drawPageAI() {
     gfx->printf("apprentissage en cours (%ld echantillons)...", feeSamples);
   }
 }
+
+// signaux calibrés (momentum TTM / squeeze, fréquences historiques mesurées)
+// FIX : ce fichier existait mais n'était inclus NULLE PART -> page Signaux v2 morte
+#include "signals.h"
 
 // =====================================================================
 //  PAGE 7 — SIGNAUX (indicateurs techniques, pas des promesses)
@@ -1974,11 +2653,6 @@ void drawPageSIG() {
   portENTER_CRITICAL(&dataMux);
   n7 = nPtsC[curCur][TF_7J];
   if (n7 > 0) memcpy(c7, closesC[curCur][TF_7J], n7 * sizeof(float));
-  portEXIT_CRITICAL(&dataMux);
-  float c30[MAX_PTS]; int n30;
-  portENTER_CRITICAL(&dataMux);
-  n30 = nPtsC[curCur][TF_30J];
-  if (n30 > 0) memcpy(c30, closesC[curCur][TF_30J], n30 * sizeof(float));
   portEXIT_CRITICAL(&dataMux);
 
   // ---------- calculs communs 7J (rendements ~2h) ----------
@@ -2012,8 +2686,11 @@ void drawPageSIG() {
     gfx->setCursor(50, 72);
     gfx->print(dir > 0 ? "HAUSSIER" : dir < 0 ? "BAISSIER" : "NEUTRE");
     // force : 3 barres
-    for (int i = 0; i < 3; i++)
-      gfx->fillRoundRect(170 + i * 26, 86 - i * 8, 20, 8 + i * 8, 3, i < force ? dc : C_BG);
+    for (int i = 0; i < 3; i++) {
+      int bh = (int)((8 + i * 8) * fxEnter(600, i * 120));
+      gfx->fillRoundRect(170 + i * 26, 86 - i * 8, 20, 8 + i * 8, 3, C_BG);
+      if (i < force && bh > 2) gfx->fillRoundRect(170 + i * 26, 94 - bh, 20, bh, 3, dc);
+    }
     gfx->setTextSize(1); gfx->setTextColor(C_GREY);
     gfx->setCursor(20, 100);
     gfx->print(force == 3 ? "signal FORT" : force == 2 ? "signal moyen" : "signal faible");
@@ -2026,64 +2703,11 @@ void drawPageSIG() {
     gfx->setTextColor(C_GREY); gfx->setCursor(20, 100); gfx->print("chargement 7J...");
   }
 
-  // ---------- panneau 2 : squeeze Bollinger ----------
-  gfx->fillRoundRect(318, 48, 152, 116, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(328, 56); gfx->print("SQUEEZE 30J");
-  float d[31]; int nd = 0;
-  for (int i = 0; i < n30 && nd < 31; i += 3) d[nd++] = c30[i];
-  if (nd >= 21) {
-    auto bwOf = [&](int end) {
-      float ma = 0; for (int i = end - 19; i <= end; i++) ma += d[i]; ma /= 20;
-      float s2 = 0; for (int i = end - 19; i <= end; i++) s2 += (d[i] - ma) * (d[i] - ma);
-      return 4.0f * sqrtf(s2 / 20) / ma * 100.0f;
-    };
-    float bw = bwOf(nd - 1);
-    float bwAvg = bw; int cnt = 1;
-    for (int e = nd - 6; e >= 20; e -= 5) { bwAvg += bwOf(e); cnt++; }
-    bwAvg /= cnt;
-    bool sq = bw < 0.6f * bwAvg;
-    char bws[12]; snprintf(bws, sizeof(bws), "%.1f", bw);
-    drawSmooth(328, 70, bws, sq ? C_ORANGE : C_WHITE, C_PANEL);
-    gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-    gfx->setCursor(332 + smoothWidth(bws), 96); gfx->print("% bw");
-    gfx->fillRoundRect(328, 118, 130, 22, 6, sq ? C_ORANGE_D : C_PANEL);
-    gfx->setTextColor(sq ? C_ORANGE : C_GREY);
-    gfx->setCursor(338, 125); gfx->print(sq ? "COMPRESSION" : "pas de squeeze");
-    gfx->setTextColor(C_DGREY);
-    gfx->setCursor(328, 148); gfx->printf("ref %.1f%%", bwAvg);
-  } else {
-    gfx->setTextColor(C_GREY); gfx->setCursor(328, 100); gfx->print("chargement...");
-  }
+  // ---------- panneau 2 : compression calibrée (TTM squeeze, pctl 120 j) ----------
+  drawPanelSqueezeCal(318, 48);
 
-  // ---------- panneau 3 : indicateur technique ----------
-  gfx->fillRoundRect(10, 172, 460, 64, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(20, 180); gfx->print("INDICATEUR TECHNIQUE");
-  if (nd >= 16) {
-    float ru = 0, rd = 0;
-    for (int i = nd - 14; i < nd; i++) {
-      float diff = d[i] - d[i - 1];
-      if (diff > 0) ru += diff; else rd -= diff;
-    }
-    float rsi = (rd == 0) ? 100.0f : 100.0f - 100.0f / (1.0f + ru / rd);
-    float mom = d[nd - 1] / d[max(0, nd - 8)] - 1.0f;
-    float mn = d[0], mx = d[0];
-    for (int i = 1; i < nd; i++) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
-    float rangePos = (mx > mn) ? (d[nd - 1] - mn) / (mx - mn) : 0.5f;
-    int score = constrain((int)(0.5f * rsi + 0.3f * (50 + mom * 400) + 0.2f * rangePos * 100), 0, 100);
-    gfx->fillRoundRect(20, 198, 260, 12, 6, C_BG);
-    uint16_t sc = score > 66 ? C_GREEN : score > 33 ? C_YELLOW : C_RED;
-    gfx->fillRoundRect(20, 198, (int)(260 * score / 100.0f), 12, 6, sc);
-    char scs[8]; snprintf(scs, sizeof(scs), "%d", score);
-    drawSmooth(300, 184, scs, sc, C_PANEL);
-    gfx->setTextSize(1); gfx->setTextColor(C_WHITE);
-    gfx->setCursor(300, 226);
-    gfx->print(score > 66 ? "plutot surachete" : score > 33 ? "neutre" : "plutot survendu");
-    gfx->setTextColor(C_GREY);
-    gfx->setCursor(20, 216); gfx->printf("RSI14 %.0f  mom7j %s%.1f%%  pos30j %.0f%%",
-      rsi, mom >= 0 ? "+" : "", mom * 100, rangePos * 100);
-  } else {
-    gfx->setTextColor(C_GREY); gfx->setCursor(20, 200); gfx->print("chargement 30J...");
-  }
+  // ---------- panneau 3 : direction calibrée (fréquences historiques 2017-) ----------
+  drawPanelDirectionCal(10, 172);
 
   // ---------- panneau 4 : anomalies ----------
   gfx->fillRoundRect(10, 244, 460, 46, 8, C_PANEL);
@@ -2240,14 +2864,13 @@ void doomDrawPoster(int pi) {
   float ang = normAng(atan2f(dy, dx) - dmA);
   if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) return;
   float perp = dist * cosf(ang);
-  if (perp < 0.15f) return;
+  if (perp < 0.7f) return;                          // trop près : l'affiche masquait tout l'écran
   int rh = DOOM_BOT - DOOM_TOP;
-  int sh = (int)(rh * 0.42f / perp);
+  int sh = min(64, (int)(rh * 0.42f / perp));
   if (sh < 8) return;
   int sw = sh * 2;
   int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
-  int yb = DOOM_TOP + (rh + (int)(rh / perp)) / 2;
-  int y0 = yb - sh - sh / 3;                       // accrochée à hauteur de mur
+  int y0 = DOOM_TOP + rh / 2 - sh / 2 - sh / 6;     // accrochée à hauteur des yeux
   for (int x = max(0, sx - sw / 2); x <= min(SCR_W - 1, sx + sw / 2); x++) {
     if (perp >= zbuf[x / DOOM_COLW]) continue;
     bool bd = (x <= sx - sw / 2 + 1 || x >= sx + sw / 2 - 1);
@@ -2279,7 +2902,7 @@ void drawPageDoom() {
   //                               horizontal = STRAFE gauche/droite
   // doigt zone DROITE (x >= 240) : regard — horizontal = tourner
   // (FIRE et ✕ conservés ; base flottante à la pose de chaque doigt)
-  static struct Finger { bool on; int bx, by, kx, ky; } fL = {false}, fR = {false};
+  static struct Finger { bool on; int bx, by, kx, ky; } fL = {false, 0, 0, 0, 0}, fR = {false, 0, 0, 0, 0};
   static bool fireHeld = false;
   uint16_t txs[2], tys[2]; uint8_t tev[2];
   int nt = readTouchMulti(txs, tys, tev, 2);
@@ -2307,8 +2930,11 @@ void drawPageDoom() {
     if (lat > 0.2f) lat = 0.2f; if (lat < -0.2f) lat = -0.2f;
     float nx = dmX + cosf(dmA) * fwd - sinf(dmA) * lat;
     float ny = dmY + sinf(dmA) * fwd + cosf(dmA) * lat;
-    if (!dmMap[(int)dmY][(int)nx]) dmX = nx;
-    if (!dmMap[(int)ny][(int)dmX]) dmY = ny;
+    // collision avec marge de 0,2 case : la caméra ne rentre plus "dans" les murs
+    // (avant : écran entièrement orange collé à un mur)
+    const float PR = 0.2f;
+    if (!dmMap[(int)dmY][(int)(nx + (nx > dmX ? PR : -PR))]) dmX = nx;
+    if (!dmMap[(int)(ny + (ny > dmY ? PR : -PR))][(int)dmX]) dmY = ny;
   }
   // regard : vitesse de rotation ∝ déport du joystick droit
   if (fR.on) dmA += (fR.kx - fR.bx) * 2.5f / 48.0f * dt;    // max ~2.5 rad/s
@@ -2418,9 +3044,16 @@ void drawPageDoom() {
     }
   }
 
-  // ---- ciel + sol ----
-  gfx->fillRect(0, DOOM_TOP, SCR_W, rh / 2, C_BG);
-  gfx->fillRect(0, DOOM_TOP + rh / 2, SCR_W, rh - rh / 2, C_PANEL);
+  // ---- ciel (nuit -> lueur orange à l'horizon) + sol (brouillard au loin) ----
+  {
+    const int NBs = 8; int half = rh / 2;
+    for (int k = 0; k < NBs; k++) {
+      int y0 = DOOM_TOP + half * k / NBs, y1 = DOOM_TOP + half * (k + 1) / NBs;
+      gfx->fillRect(0, y0, SCR_W, y1 - y0, mix565(C_BG, C_ORANGE_D, (uint8_t)(k * k * 2)));
+      int f0 = DOOM_TOP + half + (rh - half) * k / NBs, f1 = DOOM_TOP + half + (rh - half) * (k + 1) / NBs;
+      gfx->fillRect(0, f0, SCR_W, f1 - f0, mix565(C_BG, C_PANEL, (uint8_t)(80 + k * 24)));
+    }
+  }
 
   // ---- raycasting DDA (+ z-buffer pour les sprites) ----
   for (int i = 0; i < DOOM_RAYS; i++) {
@@ -2445,6 +3078,27 @@ void drawPageDoom() {
     int lvl = dist > 5 ? 3 : dist > 3 ? 2 : dist > 1.5f ? 1 : 0;
     int y0 = DOOM_TOP + (rh - h) / 2;
     gfx->fillRect(i * DOOM_COLW, max(y0, DOOM_TOP), DOOM_COLW, min(h, rh), dmShade[side][lvl]);
+    // ---- texture briques (murs proches) : joints horizontaux + verticaux décalés ----
+    if (h > 36) {
+      uint16_t mortar = shade565(dmShade[side][lvl], 55);
+      const int ROWS = 6, x0c = i * DOOM_COLW;
+      for (int r = 1; r < ROWS; r++) {
+        int yy = y0 + h * r / ROWS;
+        if (yy > DOOM_TOP && yy < DOOM_BOT) gfx->drawFastHLine(x0c, yy, DOOM_COLW, mortar);
+      }
+      if (h > 64) {
+        float rawD = (side == 0 ? sdx - ddx : sdy - ddy);
+        float wx = side == 0 ? dmY + rawD * rdy : dmX + rawD * rdx;
+        wx -= floorf(wx);
+        for (int r = 0; r < ROWS; r++) {
+          float dj = (r % 2) ? fabsf(wx - 0.5f) : min(wx, 1.0f - wx);
+          if (dj < 0.03f) {
+            int ya = max(DOOM_TOP, y0 + h * r / ROWS), yb = min(DOOM_BOT, y0 + h * (r + 1) / ROWS);
+            if (yb > ya) gfx->drawFastVLine(x0c + 1, ya, yb - ya, mortar);
+          }
+        }
+      }
+    }
   }
 
   // ---- affiches Bitcoin sur les murs ----
@@ -2603,22 +3257,154 @@ void drawPageDoom() {
 }
 
 // =====================================================================
-//  ANIM NOUVEAU BLOC (flash classique — pages autres que Cube)
+//  CUBE ISOMÉTRIQUE (cinématique nouveau bloc, splash)
+//  (cx, cy) = centre de la face du dessus, a = arête en pixels
 // =====================================================================
+void fxIsoCube(int cx, int cy, int a, uint16_t cTop, uint16_t cL, uint16_t cR, bool edges = true) {
+  int hw = (int)(a * 0.866f), hh = a / 2;
+  int Tx = cx, Ty = cy - hh, Rx = cx + hw, Ry = cy, Bx = cx, By = cy + hh, Lx = cx - hw, Ly = cy;
+  gfx->fillTriangle(Tx, Ty, Rx, Ry, Bx, By, cTop);
+  gfx->fillTriangle(Tx, Ty, Lx, Ly, Bx, By, cTop);
+  gfx->fillTriangle(Lx, Ly, Bx, By, Bx, By + a, cL);
+  gfx->fillTriangle(Lx, Ly, Lx, Ly + a, Bx, By + a, cL);
+  gfx->fillTriangle(Bx, By, Rx, Ry, Rx, Ry + a, cR);
+  gfx->fillTriangle(Bx, By, Bx, By + a, Rx, Ry + a, cR);
+  if (edges) {
+    uint16_t e = mix565(cTop, C_WHITE, 150);
+    gfx->drawLine(Lx, Ly, Tx, Ty, e); gfx->drawLine(Tx, Ty, Rx, Ry, e);
+    gfx->drawLine(Lx, Ly, Bx, By, mix565(cTop, C_WHITE, 70));
+    gfx->drawLine(Bx, By, Rx, Ry, mix565(cTop, C_WHITE, 70));
+    gfx->drawFastVLine(Bx, By, a, mix565(cL, C_WHITE, 60));
+  }
+}
+// chaîne horizontale : maillons alternés
+void fxChainH(int x0, int x1, int y, uint16_t c) {
+  int i = 0;
+  for (int x = x0; x + 10 <= x1; x += 9, i++) {
+    if (i % 2 == 0) gfx->drawRoundRect(x, y - 3, 12, 7, 3, c);
+    else            gfx->drawRoundRect(x + 2, y - 1, 8, 3, 1, c);
+  }
+}
+
+// =====================================================================
+//  CINÉMATIQUE NOUVEAU BLOC (pages autres que Cube / Doom)
+//  Remplace l'ancien stroboscope orange/noir (5 flashs plein écran) :
+//  flash doux -> le bloc tombe et rebondit -> onde de choc + gerbe de
+//  particules -> il s'accroche à la chaîne -> hauteur / pool -> fondu.
+// =====================================================================
+#define NB_DUR 3300
+#define NB_NP  44
+struct NbPart { float x, y, vx, vy; uint16_t c; };
+NbPart nbP[NB_NP];
+bool   nbBurst = false;
+
 void drawBlockAnim() {
-  unsigned long e = millis() - animStart;
-  if (e > 2600) { animNewBlock = false; needRedraw = true; return; }
-  int phase = (e / 260) % 2;
-  gfx->fillScreen(phase ? C_ORANGE : C_BG);
-  textCenter("NEW BLOCK", 110, 4, phase ? C_BG : C_ORANGE);
-  textCenter(String(blockHeight), 170, 3, phase ? C_BG : C_ORANGE);
+  long e = (long)(millis() - animStart);     // signé : (e - 520) < 0 avant l'apparition
+  if (e > NB_DUR) { animNewBlock = false; needRedraw = true; pageEnterMs = millis(); return; }
   char pool[32]; long btx; snapLastBlock(pool, sizeof(pool), &btx);
-  textCenter(pool, 220, 2, phase ? C_BG : C_GREY);
+
+  if (!fxAny()) {                       // animations coupées : carte fixe, sans strobo
+    gfx->fillScreen(C_BG);
+    textCenter("NEW BLOCK", 100, 4, C_ORANGE);
+    textCenter(String(blockHeight), 160, 3, C_WHITE);
+    textCenter(pool, 210, 2, C_GREY);
+    gfx->flush();
+    return;
+  }
+  fxT = millis();
+  // ---- fond : flash doux orange qui retombe (un seul, pas de stroboscope) ----
+  float kf = clamp01(e / 260.0f);
+  uint16_t bgc = mix565(C_BG, C_ORANGE, (uint8_t)(170 * (1 - kf) * (1 - kf)));
+  gfx->fillScreen(bgc);
+  const int CX = 240, CY = 118, A = 44;          // face du dessus du nouveau bloc
+  const int GROUND = CY + A / 2 + A;             // bas du cube posé
+  // halo derrière le bloc (sur la couleur de fond courante)
+  fxHalo(CX, CY + A / 2, 70, C_ORANGE, bgc, (uint8_t)(55 + 25 * fxPulse(700)), 5);
+
+  // ---- ondes de choc à l'impact ----
+  for (int i = 0; i < 3; i++) {
+    long ei = (long)e - 240 - i * 170;
+    if (ei > 0) fxRing(CX, GROUND - 10, 20, 320, ei / 900.0f, i == 0 ? C_YELLOW : C_ORANGE, bgc);
+  }
+
+  // ---- blocs précédents (chaîne) qui glissent depuis la gauche ----
+  float ks = easeOutCubic(e / 600.0f);
+  int shift = (int)(-70 * (1 - ks));
+  uint16_t dTop = mix565(C_BG, C_ORANGE, 120), dL = mix565(C_BG, C_ORANGE_D, 200), dR = mix565(C_BG, C_ORANGE_D, 120);
+  fxIsoCube(CX - 240 + shift, CY, A, dTop, dL, dR);
+  fxIsoCube(CX - 120 + shift, CY, A, dTop, dL, dR);
+  fxChainH(CX - 240 + shift + 38, CX - 120 + shift - 38, CY + A / 2 + A / 2, C_GREY);
+  // maillon qui relie le nouveau bloc (apparaît après l'impact)
+  if (e > 620) {
+    int x0 = CX - 120 + 38, x1 = CX - 38;
+    int xr = x0 + (int)((x1 - x0) * easeOutCubic((e - 620) / 380.0f));
+    fxChainH(x0, xr, CY + A / 2 + A / 2, mix565(C_GREY, C_ORANGE, u8f(1 - (e - 620) / 800.0f)));
+  }
+
+  // ---- le nouveau bloc tombe et rebondit ----
+  float kd = easeOutBounce(e / 650.0f);
+  int cy = -90 + (int)((CY + 90) * kd);
+  fxIsoCube(CX, cy, A, mix565(C_ORANGE, C_YELLOW, 110), C_ORANGE, C_ORANGE_D);
+  // petit "B" gravé sur la face gauche
+  gfx->setTextSize(2); gfx->setTextColor(mix565(C_ORANGE, C_WHITE, 170));
+  gfx->setCursor(CX - 26, cy + 22); gfx->print("B");
+
+  // ---- gerbe de particules au premier impact ----
+  if (e >= 236 && !nbBurst) {
+    nbBurst = true;
+    for (int i = 0; i < NB_NP; i++) {
+      float ang = PI + (random(0, 1000) / 1000.0f) * PI;         // vers le haut
+      float sp = 2.0f + random(0, 400) / 100.0f;
+      nbP[i].x = CX + random(-30, 31); nbP[i].y = GROUND - 4;
+      nbP[i].vx = cosf(ang) * sp * 1.3f; nbP[i].vy = sinf(ang) * sp;
+      nbP[i].c = (i % 3 == 0) ? C_YELLOW : (i % 3 == 1 ? C_ORANGE : C_WHITE);
+    }
+  }
+  if (nbBurst && e < 1800) {
+    float fade = clamp01((e - 236) / 1500.0f);
+    for (int i = 0; i < NB_NP; i++) {
+      NbPart &p = nbP[i];
+      p.x += p.vx; p.y += p.vy; p.vy += 0.22f; p.vx *= 0.985f;
+      if (p.y > GROUND + 60) continue;
+      gfx->fillRect((int)p.x, (int)p.y, 3, 3, mix565(p.c, C_BG, u8f(fade)));
+    }
+  }
+
+  // ---- titre machine à écrire ----
+  const char *title = "NEW BLOCK";
+  int nch = min(9, (int)(e / 45));
+  char tb[12]; strlcpy(tb, title, nch + 1);
+  gfx->setTextSize(4); gfx->setTextColor(C_ORANGE);
+  gfx->setCursor((SCR_W - 9 * 24) / 2, 22); gfx->print(tb);
+  if (nch < 9 && (e / 90) % 2 == 0) gfx->fillRect((SCR_W - 9 * 24) / 2 + nch * 24, 22, 4, 28, C_YELLOW);
+  int ulw = (int)(9 * 24 * easeOutCubic((e - 300) / 600.0f));
+  if (ulw > 0) gfx->fillRect(CX - ulw / 2, 54, ulw, 2, C_YELLOW);
+
+  // ---- hauteur (chiffres lissés) + pool, en fondu ----
+  char hs[16]; snprintf(hs, sizeof(hs), "%ld", blockHeight);
+  float kh = clamp01((e - 520) / 400.0f);
+  if (kh > 0) {
+    int hw = smoothWidth(hs);
+    drawSmooth(CX - hw / 2, 202, hs, mix565(C_BG, C_WHITE, u8f(kh)), C_BG);
+  }
+  float kp = clamp01((e - 850) / 400.0f);
+  if (kp > 0) {
+    char line[48]; snprintf(line, sizeof(line), "mine par %s", pool);
+    textCenter(line, 256, 2, mix565(C_BG, C_ORANGE, u8f(kp)));
+    if (btx > 0) {
+      snprintf(line, sizeof(line), "%s transactions", prettyNum(btx).c_str());
+      textCenter(line, 280, 1, mix565(C_BG, C_GREY, u8f(kp)));
+    }
+  }
+  // ---- fondu de sortie ----
+  if (e > NB_DUR - 380) fxDimAll(u8f((e - (NB_DUR - 380)) / 380.0f));
   gfx->flush();
 }
 
-void drawCurrentPage() {
+// dessine la page courante dans le canvas (sans flush)
+void renderPage() {
   gfx->fillScreen(C_BG);
+  if (page != PG_CUBE && page != PG_DOOM) fxDrawDust();
   drawHeader();
   switch (page) {
     case PG_PRICE: drawPagePrice(); break;
@@ -2632,28 +3418,108 @@ void drawCurrentPage() {
     case PG_DOOM:  drawPageDoom(); break;
   }
   drawFooter();
+}
+
+void drawCurrentPage() {
+  fxT = millis();
+  renderPage();
   gfx->flush();
+}
+
+// =====================================================================
+//  TRANSITION GLISSÉE ENTRE PAGES
+//  Canvas en rotation 1 : chaque COLONNE logique (x) est une ligne native
+//  contiguë de 320 pixels -> un glissement horizontal = 1 memcpy par
+//  colonne (~270 px, la zone de contenu). Header/footer restent fixes.
+//  dir = +1 : la nouvelle page arrive par la droite ; -1 : par la gauche.
+// =====================================================================
+void fxSlide(int dir) {
+  uint16_t *fb = gfx->getFramebuffer();
+  if (!fb || !fxPrevFb || !fxNextFb || !fxAny()) { drawCurrentPage(); return; }
+  memcpy(fxPrevFb, fb, FB_PIX * 2);          // ancien écran (dernier rendu)
+  fxT = millis(); pageEnterMs = fxT;
+  renderPage();                               // nouvelle page dans le canvas
+  memcpy(fxNextFb, fb, FB_PIX * 2);
+  const int I0 = PANEL_W - NAV_Y;             // index natif de y = NAV_Y-1
+  const int CN = NAV_Y - 27;                  // lignes logiques 27..NAV_Y-1
+  const unsigned long DUR = 320;
+  unsigned long t0 = millis();
+  for (;;) {
+    float k = clamp01((millis() - t0) / (float)DUR);
+    int off = (int)(easeOutCubic(k) * SCR_W);
+    for (int x = 0; x < SCR_W; x++) {
+      int sx = dir > 0 ? x + off : x - off;
+      const uint16_t *src;
+      if (sx >= 0 && sx < SCR_W) src = fxPrevFb + sx * PANEL_W;
+      else src = fxNextFb + (dir > 0 ? sx - SCR_W : sx + SCR_W) * PANEL_W;
+      memcpy(fb + x * PANEL_W + I0, src + I0, CN * 2);
+    }
+    int seam = dir > 0 ? SCR_W - off : off;   // couture lumineuse
+    if (seam > 1 && seam < SCR_W - 2) {
+      gfx->drawFastVLine(seam, 27, CN, C_ORANGE);
+      gfx->drawFastVLine(seam - dir, 27, CN, mix565(C_BG, C_ORANGE, 110));
+      gfx->drawFastVLine(seam - 2 * dir, 27, CN, mix565(C_BG, C_ORANGE, 45));
+    }
+    fxT = millis();
+    gfx->fillRect(0, NAV_Y, SCR_W, SCR_H - NAV_Y, C_BG);   // soulignement qui glisse
+    drawFooter();
+    gfx->flush();
+    if (k >= 1.0f) break;
+  }
+}
+
+// changement de page centralisé (tap onglet, swipe, sortie Doom)
+void gotoPage(int np, int dir) {
+  if (np == page) return;
+  page = np;
+  if (page == PG_POOLS) poolsReset = true;
+  if (page == PG_DOOM) doomReset = true;
+  if (page == PG_AI || page == PG_SIG) requestFetch(REQ_KL30);
+  fxSlide(dir);
+  pageEnterMs = millis();
+  lastDrawMs = millis(); needRedraw = false;
 }
 
 // =====================================================================
 //  SETUP — boot non bloquant : l'UI s'affiche tout de suite avec des
 //  états "chargement...", REQ_ALL est poussé dans netTask qui fetchera.
 // =====================================================================
+// splash de démarrage animé (logo, halo, ondes, reflet, barre de progression)
+void bootSplash(const char *msg, float prog) {
+  fxT = millis();
+  gfx->fillScreen(C_BG);
+  const int cx = SCR_W / 2, cy = 132;
+  fxHalo(cx, cy, 64, C_ORANGE, C_BG, (uint8_t)(45 + 45 * fxPulse(1600)), 4);
+  for (int i = 0; i < 3; i++) fxRing(cx, cy, 52, 170, ((fxT + i * 700) % 2100) / 2100.0f, C_ORANGE, C_BG);
+  gfx->draw16bitRGBBitmapWithTranColor(cx - 48, cy - 48, (uint16_t*)BTC_LOGO_96, TRANSP, 96, 96);
+  fxShineBitmap(cx - 48, cy - 48, BTC_LOGO_96, 96, 96, TRANSP, (fxT % 2600) / 1300.0f, 16, 150);
+  textCenter("BLOCK CLOCK", 206, 3, C_ORANGE);
+  if (prog >= 0) fxBar(140, 244, 200, 6, prog, C_ORANGE, C_PANEL);
+  else {                                               // indéterminé : segment qui va-et-vient
+    gfx->fillRoundRect(140, 244, 200, 6, 3, C_PANEL);
+    int x = 140 + (int)(150 * fxPulse(1400));
+    gfx->fillRoundRect(x, 244, 50, 6, 3, C_ORANGE);
+  }
+  textCenter(msg, 260, 1, C_GREY);
+  textCenter("V5 - by silexperience", 300, 1, C_DGREY);
+  gfx->flush();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== BITCOIN BLOCK CLOCK V4 ===");
+  Serial.println("\n=== BITCOIN BLOCK CLOCK V5 ===");
 
   ledcSetup(0, 5000, 10);
   ledcAttachPin(PIN_BL, 0);
   setBacklight(70);
 
   gfx->begin();
-  gfx->fillScreen(C_BG);
-  gfx->draw16bitRGBBitmapWithTranColor(SCR_W / 2 - 48, 90, (uint16_t*)BTC_LOGO_96, TRANSP, 96, 96);
-  textCenter("BLOCK CLOCK", 210, 3, C_ORANGE);
-  textCenter("demarrage...", 250, 2, C_GREY);
-  gfx->flush();
+  // buffers des transitions glissées (2 x 300 Ko en PSRAM) ; sans eux : coupe franche
+  fxPrevFb = (uint16_t*)ps_malloc(FB_PIX * 2);
+  fxNextFb = (uint16_t*)ps_malloc(FB_PIX * 2);
+  if (!fxPrevFb || !fxNextFb) Serial.println("[FX] PSRAM insuffisante : transitions desactivees");
+  bootSplash("demarrage...", 0.05f);
 
   Wire.begin(TP_SDA, TP_SCL);
   Wire.setClock(400000);
@@ -2662,12 +3528,17 @@ void setup() {
   analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);
 
   loadConfig();
+  bootSplash("configuration chargee", 0.2f);
+  // FIX : aucun WiFi enregistré -> portail tout de suite (avant : 20 s d'attente)
+  if (cfg_ssid.length() == 0) startConfigPortal();
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  if (cfg_ssid.length() > 0) WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
+  WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
+    char m[48]; snprintf(m, sizeof(m), "connexion a %s...", cfg_ssid.c_str());
+    bootSplash(m, 0.2f + 0.8f * (millis() - t0) / 20000.0f);
+    delay(20);
     if (millis() - t0 > 20000) startConfigPortal();
   }
   Serial.println("[WiFi] OK : " + WiFi.localIP().toString());
@@ -2684,7 +3555,12 @@ void setup() {
     s += "Au-dessus de : <input name='hi' type='number' step='any' value='" + String(alertHi, 0) + "' style='width:100%;padding:10px;margin:6px 0;background:#161b22;color:#eee;border:1px solid #444;border-radius:8px'>";
     s += "En-dessous de : <input name='lo' type='number' step='any' value='" + String(alertLo, 0) + "' style='width:100%;padding:10px;margin:6px 0;background:#161b22;color:#eee;border:1px solid #444;border-radius:8px'>";
     s += "<h2 style='color:#F7931A'>Noeud Umbrel</h2>";
-    s += "IP : <input name='nodeip' value='" + cfg_nodeip + "' style='width:100%;padding:10px;margin:6px 0;background:#161b22;color:#eee;border:1px solid #444;border-radius:8px'>";
+    s += "IP : <input name='nodeip' value='" + htmlEsc(cfg_nodeip) + "' style='width:100%;padding:10px;margin:6px 0;background:#161b22;color:#eee;border:1px solid #444;border-radius:8px'>";
+    s += "<h2 style='color:#F7931A'>Animations</h2><select name='anim' style='width:100%;padding:10px;margin:6px 0;background:#161b22;color:#eee;border:1px solid #444;border-radius:8px'>";
+    s += String("<option value='2'") + (animLevel == 2 ? " selected" : "") + ">MAX - tout est anime (~25 FPS)</option>";
+    s += String("<option value='1'") + (animLevel == 1 ? " selected" : "") + ">ECO - transitions + nouveau bloc</option>";
+    s += String("<option value='0'") + (animLevel == 0 ? " selected" : "") + ">OFF - statique</option></select>";
+    s += "<p style='color:#888;font-size:13px'>MAX repasse en ECO automatiquement la nuit (23h-7h).</p>";
     s += "<button style='width:100%;padding:14px;background:#F7931A;border:0;border-radius:8px;font-weight:bold;margin-top:8px'>Enregistrer</button></form>";
     s += "<p style='margin-top:20px'><a style='color:#F7931A' href='/reset'>Oublier le WiFi</a></p></body>";
     server.send(200, "text/html", s);
@@ -2699,14 +3575,15 @@ void setup() {
     alertHi = server.arg("hi").toFloat();
     alertLo = server.arg("lo").toFloat();
     if (server.hasArg("nodeip")) { cfg_nodeip = server.arg("nodeip"); cfg_nodeip.trim(); }
+    if (server.hasArg("anim")) animLevel = (uint8_t)constrain((int)server.arg("anim").toInt(), 0, 2);
     saveConfig();
-    latchHi = latchLo = false;
+    latchHi = latchLo = false; needRedraw = true;
     server.sendHeader("Location", "/");
     server.send(303);
   });
   server.on("/reset", HTTP_GET, []() {
     prefs.begin("bc", false); prefs.clear(); prefs.end();
-    server.send(200, "text/html", "WiFi oublie - redemarrage…");
+    server.send(200, "text/html", "<meta charset='utf-8'>WiFi oubli&eacute; - red&eacute;marrage&hellip;");
     delay(800); ESP.restart();
   });
   server.begin();
@@ -2717,12 +3594,15 @@ void setup() {
   sndQ = xQueueCreate(8, sizeof(SndNote));
   sndTxtQ = xQueueCreate(4, sizeof(SndTxt));
   xTaskCreatePinnedToCore(sndTask, "snd", 20480, NULL, 2, NULL, 0);   // sons + TTS (TLS+MP3 = gros stack)
-  xTaskCreatePinnedToCore(netTask, "net", 12288, NULL, 1, NULL, 0);   // tous les fetchs HTTP
+  xTaskCreatePinnedToCore(netTask, "net", 16384, NULL, 1, NULL, 0);   // tous les fetchs HTTP (TLS + JSON + signaux)
 
   // boot non bloquant : tout fetcher en tâche de fond, UI immédiate
   requestFetch(REQ_ALL);
   blockDetectedMs = millis();
 
+  bootSplash("WiFi OK - synchronisation...", 1.0f);
+  delay(250);
+  pageEnterMs = millis();
   drawCurrentPage();
   playStart();
 }
@@ -2734,10 +3614,11 @@ void loop() {
   server.handleClient();
   unsigned long now = millis();
   updateBattery();          // batterie : lecture cache + détection de charge (5 s)
-  // debug stack watermark (temporaire — diagnostic crash DOOM)
+#if DEBUG_WM
   static unsigned long tWm = 0;
   if (millis() - tWm > 5000) { tWm = millis();
     Serial.printf("[WM] loop free=%u\n", uxTaskGetStackHighWaterMark(NULL)); }
+#endif
   // pendant la charge : forcer le redraw pour animer le clignotement de la jauge
   static unsigned long tBatBlink = 0;
   if (batCharging && !sleeping && millis() - tBatBlink > 800) {
@@ -2746,8 +3627,9 @@ void loop() {
   }
 
   // ---------- mode nuit + tick minute (horloge du header) ----------
-  struct tm t;
-  if (getLocalTime(&t, 50)) {
+  refreshClock();                      // non bloquant (cache gTm pour tout le rendu)
+  struct tm t = gTm;
+  if (gTmOk) {
     bool night = (t.tm_hour >= 23 || t.tm_hour < 7);
     if (night != nightMode && !sleeping) {
       nightMode = night;
@@ -2804,30 +3686,24 @@ void loop() {
       else if (!touchMoved && downY >= NAV_Y) {
         int tab = constrain((int)downX / TAB_W, 0, (int)PG_COUNT - 1);
         if (tab != page) {
-          page = tab; lastActionMs = now;
           beep(1000, 50, 25);
-          if (page == PG_POOLS) poolsReset = true;
-          if (page == PG_DOOM) doomReset = true;
-          if (page == PG_AI || page == PG_SIG) requestFetch(REQ_KL30);
-          needRedraw = true;
+          gotoPage(tab, tab > page ? 1 : -1);
+          lastActionMs = millis();
         }
       }
       else if (page == PG_DOOM) {
         // page jeu : seul le ✕ compte — les drags sont des contrôles,
         // ils ne doivent ni changer de page ni déclencher le refresh
         if (downX >= GAME_EX && downX <= GAME_EX + GAME_EW && downY >= GAME_EY && downY <= GAME_EY + GAME_EH) {
-          page = PG_PRICE; beep(900, 60, 30); needRedraw = true; lastActionMs = now;
+          beep(900, 60, 30); gotoPage(PG_PRICE, -1); lastActionMs = millis();
         }
       }
       else if (abs(dx) > 50 && abs(dy) < 100) {
-        // swipe horizontal : page suivante / précédente
-        page = (dx < 0) ? (page + 1) % PG_COUNT : (page + PG_COUNT - 1) % PG_COUNT;
-        lastActionMs = now;
+        // swipe horizontal : page suivante / précédente (glissement animé)
         beep(1000, 50, 25);
-        if (page == PG_POOLS) poolsReset = true;
-        if (page == PG_DOOM) doomReset = true;
-        if (page == PG_AI || page == PG_SIG) requestFetch(REQ_KL30);   // données 30J/7J
-        needRedraw = true;
+        if (dx < 0) gotoPage((page + 1) % PG_COUNT, 1);
+        else        gotoPage((page + PG_COUNT - 1) % PG_COUNT, -1);
+        lastActionMs = millis();
       }
       else if (page == PG_PRICE && downY >= 34 && downY <= 56 && downX >= GX) {
         // onglets timeframe : cache d'abord (instantané), fetch frais ensuite
@@ -2855,9 +3731,12 @@ void loop() {
         }
       }
       else {
-        // tap global : refresh complet à la demande (netTask répond vite)
+        // tap global : refresh à la demande. REQ_ALL au plus 1×/20 s
+        // (sinon rafale d'appels CoinGecko -> HTTP 429 sur l'API gratuite)
+        static unsigned long lastFullReq = 0;
         beep(1500, 50, 30); lastActionMs = now;
-        requestFetch(REQ_ALL);
+        if (lastFullReq == 0 || now - lastFullReq > 20000) { lastFullReq = now; requestFetch(REQ_ALL); }
+        else requestFetch(REQ_PRICE | REQ_HEIGHT);
         needRedraw = true;
       }
     }
@@ -2869,7 +3748,10 @@ void loop() {
     blockDetectedMs = now;
     if (!sleeping) {
       if (page == PG_CUBE) cubeBlockSeq();           // la chaîne emporte le cube
-      else { animNewBlock = true; animStart = now; } // flash classique ailleurs
+      else if (page == PG_DOOM) {                    // pas d'interruption en jeu
+        snprintf(dmPopup, sizeof(dmPopup), "NEW BLOCK %ld", blockHeight); dmPopupMs = now;
+      }
+      else { animNewBlock = true; animStart = now; nbBurst = false; }   // cinématique
     }
 #if SPEECH_BLOCKS
     // annonce vocale : "New block. <pool>." (filtrée la nuit / en veille)
@@ -2887,30 +3769,42 @@ void loop() {
   if (evAnomaly) { evAnomaly = false; playAlarm(); }   // z-score anormal détecté
 
   if (sleeping) { delay(50); return; }
-  if (animNewBlock) { drawBlockAnim(); delay(40); return; }
+  if (animNewBlock) { drawBlockAnim(); delay(10); return; }
 
-  // ---------- redraw intelligent (plus de redraw forcé périodique) ----------
-  // Les redraws des pages statiques sont différés tant que le doigt est posé :
+  // prix : cible, flash vert/rouge au changement, interpolation douce
+  {
+    static float lastTarget = 0; static uint8_t lastCur = 255;
+    float target = btcPrice[curCur];
+    if (curCur != lastCur) { lastCur = curCur; lastTarget = target; dispPrice = target; }
+    else if (target > 0 && target != lastTarget) {
+      if (lastTarget > 0) { priceFlashMs = now; priceFlashUp = target > lastTarget; }
+      lastTarget = target;
+    }
+    if (dispPrice <= 0 && target > 0) dispPrice = target;   // 1re valeur : directe
+  }
+
+  // ---------- redraw ----------
+  // Les redraws sont différés tant que le doigt est posé (sauf jeux) :
   // un swipe n'est jamais perdu pendant un flush (~60 ms).
   if (page == PG_CUBE || page == PG_DOOM) {
     // pages animées : ~30 FPS permanent (le jeu doit tourner même doigt posé)
-    if (now - lastDrawMs >= 33) { lastDrawMs = now; drawCurrentPage(); }
+    if (now - lastDrawMs >= 33) { lastDrawMs = now; needRedraw = false; drawCurrentPage(); }
+  } else if (fxFull()) {
+    // MAX : toutes les pages sont vivantes (~25 FPS)
+    if (!touched && now - lastDrawMs >= FX_FRAME_MS) {
+      if (page == PG_PRICE) stepDispPrice();
+      lastDrawMs = now; needRedraw = false; drawCurrentPage();
+    }
   } else if (page == PG_POOLS && (long)(poolsAnimUntil - now) > 0) {
     // course des barres : ~30 FPS le temps de converger
     if (!touched && now - lastDrawMs >= 33) { lastDrawMs = now; drawCurrentPage(); }
-  } else if (page == PG_CHAIN) {
-    // chrono "il y a Xs" : tick 1 Hz
+  } else if (page == PG_CHAIN || page == PG_AI) {
+    // chronos "il y a Xs" / prochain bloc : tick 1 Hz
     if (!touched && (needRedraw || now - lastDrawMs >= 1000)) { lastDrawMs = now; needRedraw = false; drawCurrentPage(); }
   } else if (page == PG_PRICE) {
     // prix animé : interpolation douce vers la cible (~30 FPS pendant la transition)
-    float target = btcPrice[curCur];
-    if (dispPrice <= 0 && target > 0) dispPrice = target;   // 1re valeur : directe
-    if (fabsf(dispPrice - target) >= 0.5f) {
-      if (!touched && now - lastDrawMs >= 33) {
-        dispPrice += (target - dispPrice) * 0.18f;
-        if (fabsf(dispPrice - target) < 0.5f) dispPrice = target;
-        lastDrawMs = now; needRedraw = false; drawCurrentPage();
-      }
+    if (fabsf(dispPrice - btcPrice[curCur]) >= 0.5f || (fxAny() && now - priceFlashMs < 1400)) {
+      if (!touched && now - lastDrawMs >= 33) { stepDispPrice(); lastDrawMs = now; needRedraw = false; drawCurrentPage(); }
     } else if (needRedraw && !touched) { lastDrawMs = now; needRedraw = false; drawCurrentPage(); }
   } else if (needRedraw && !touched) {
     // pages statiques : redraw uniquement sur événement / tick minute

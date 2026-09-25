@@ -141,6 +141,13 @@ with **zero repair**.
   the WiFi dots) to cycle **100 % → 60 % → 30 % → mute**, saved in flash
   (applies to bells *and* the SAM voice). Night mode (23:00–07:00) silences
   event sounds; UI beeps remain.
+- **Animations (V5):** on `http://blockclock.local`, choose **MAX** (every
+  page animated, ~25 FPS), **ECO** (page transitions + new-block cinematic
+  only, lowest power) or **OFF** (static). MAX automatically drops to ECO at
+  night (23:00–07:00). On battery, ECO noticeably extends runtime.
+- **Header life-line:** the thin orange line under the header fills toward
+  ~10 minutes since the last block (its real timestamp) and turns red when the
+  next block is late.
 - **Boot/Reset buttons:** also inside the case — open the shell to reprogram
   the board, or flash it before final assembly.
 - The case leans back 12° with a full-length flat base: stable on any desk.
@@ -157,6 +164,8 @@ with **zero repair**.
 | USB plug doesn't fit | Cutout is 11 × 5.2 mm; use a slim plug or slightly enlarge `USB_W`/`USB_H` |
 | Case rocks (v1) | Base is stability-checked; ensure the bottom face printed flat (no elephant foot) — sand lightly if needed |
 | Speaker sounds muffled (v2) | Make sure it sits against the grille slots, not against a solid wall |
+| Screen feels sluggish / board warm | Set **Animations: ECO** on the web page |
+| Stuck on the WiFi setup screen after a power cut | V5 retries the saved WiFi automatically every 5 min — or reconfigure via `BlockClock-Setup` |
 
 ## 8. Care
 

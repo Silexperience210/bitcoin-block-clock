@@ -4,3 +4,6 @@ __pycache__/
 ref/case_orig.zip
 .DS_Store
 Thumbs.db
+firmware/tools/sim/build/
+firmware/tools/sim/out/
+firmware/bitcoin-block-clock/build/

@@ -2,16 +2,24 @@
 
 Projet complet, signé **silexperience** :
 
-- **Firmware** (`firmware/`) : horloge Bitcoin vitrine V4 — 9 pages (prix,
+- **Firmware** (`firmware/`) : horloge Bitcoin vitrine **V5** — 9 pages (prix,
   on-chain, cube, pools war, lightning, nœud, IA locale, signaux, BTC DOOM),
-  architecture FreeRTOS, alertes sonores, portail WiFi. Documentation de
-  développement : [`firmware/PROJET-NOTES.md`](firmware/PROJET-NOTES.md).
+  architecture FreeRTOS, alertes sonores, portail WiFi. **V5 : tout l'écran est
+  animé** — cinématique « nouveau bloc », transitions glissées, frise de blocs
+  façon mempool.space, graphe qui se dessine, réseau Lightning vivant… avec un
+  réglage **MAX / ECO / OFF** sur la page web (ECO automatique la nuit).
+  Documentation de développement : [`firmware/PROJET-NOTES.md`](firmware/PROJET-NOTES.md).
+- **Simulateur** (`firmware/tools/sim/`) : compile le vrai code de dessin pour
+  PC (Linux/macOS), rend les 9 pages, une vidéo de démo et vérifie la mémoire
+  avec AddressSanitizer.
 - **Boîtier** (`case/`) : deux versions au choix —
   - **v1 compacte** (`case/build_case.py`) : coque arrière « galet Alexa » de
     20 mm, l'écran nu forme la face avant, fixation par les 4 vis d'origine.
   - **v2 profonde ~15 cm** (`case/build_case_deep.py`) : version 2 pièces pour
     **haut-parleur + batterie 2000 mAh**, style « mini TV rétro / Echo Show »,
     avec grille haut-parleur au dos.
+
+![Cinématique nouveau bloc](images/new-block-cinematic.gif)
 
 Compilation / flash du firmware : voir [README.md](README.md) (anglais).
 Manuel d'utilisation : [MANUAL.md](MANUAL.md) (anglais).

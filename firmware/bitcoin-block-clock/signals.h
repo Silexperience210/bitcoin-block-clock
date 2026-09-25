@@ -57,7 +57,9 @@ static bool fetchKlinesStream(const char *interval, int limit,
                               float *H, float *L, float *C, int *N, int cap) {
   WiFiClientSecure cl; cl.setInsecure(); cl.setTimeout(12000);
   if (!cl.connect("data-api.binance.vision", 443)) return false;
-  cl.printf("GET /api/v3/klines?symbol=BTCUSDT&interval=%s&limit=%d HTTP/1.1\r\n"
+  // HTTP/1.0 : jamais de réponse "chunked" -> les tailles de chunk en hexa
+  // ne peuvent pas s'intercaler dans les nombres lus par le parseur streaming
+  cl.printf("GET /api/v3/klines?symbol=BTCUSDT&interval=%s&limit=%d HTTP/1.0\r\n"
             "Host: data-api.binance.vision\r\nConnection: close\r\n\r\n",
             interval, limit);
   // saute les headers HTTP
@@ -109,8 +111,10 @@ done:
 }
 
 static bool fetchSignals() {                       // appeler depuis netTask
-  float tH[SIG_ND], tL[SIG_ND], tC[SIG_ND]; int tn = 0;
-  float uH[SIG_NW], uL[SIG_NW], uC[SIG_NW]; int un = 0;
+  // static : ~4,6 Ko hors de la pile de netTask (appelée uniquement par elle)
+  static float tH[SIG_ND], tL[SIG_ND], tC[SIG_ND];
+  static float uH[SIG_NW], uL[SIG_NW], uC[SIG_NW];
+  int tn = 0, un = 0;
   bool ok1 = fetchKlinesStream("1d", SIG_ND, tH, tL, tC, &tn, SIG_ND);
   bool ok2 = fetchKlinesStream("1w", SIG_NW, uH, uL, uC, &un, SIG_NW);
   if (!ok1 || !ok2) return false;
@@ -160,8 +164,11 @@ static void ttmCore(const float *h, const float *l, const float *c, int n, int i
 }
 
 static void computeSignals() {
-  float h[SIG_ND], l[SIG_ND], c[SIG_ND]; int n;
-  float wh[SIG_NW], wl[SIG_NW], wc[SIG_NW]; int wn;
+  // static : sinon ~4,6 Ko de plus empilés PAR-DESSUS fetchSignals()
+  // (~9 Ko au total sur une pile netTask de 12 Ko -> débordement)
+  static float h[SIG_ND], l[SIG_ND], c[SIG_ND];
+  static float wh[SIG_NW], wl[SIG_NW], wc[SIG_NW];
+  int n, wn;
   portENTER_CRITICAL(&dataMux);
   n = sgN; memcpy(h, sgH, n * 4); memcpy(l, sgL, n * 4); memcpy(c, sgC, n * 4);
   wn = swN; memcpy(wh, swH, wn * 4); memcpy(wl, swL, wn * 4); memcpy(wc, swC, wn * 4);
@@ -216,17 +223,18 @@ static void computeSignals() {
 // ======================================================================
 static void drawPanelSqueezeCal(int X, int Y) {          // 152 x 116
   gfx->fillRoundRect(X, Y, 152, 116, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(X + 10, Y + 8); gfx->print("COMPRESSION");
+  gfx->setTextSize(1); gfx->setTextColor(C_GREY); gfx->setCursor(X + 10, Y + 8); gfx->print("COMPRESSION");
   SigState s; portENTER_CRITICAL(&dataMux); s = sig; portEXIT_CRITICAL(&dataMux);
   if (!s.ready) { gfx->setCursor(X + 10, Y + 52); gfx->print("calcul..."); return; }
   bool deep = s.bbwPctl < 10;
   char p[12]; snprintf(p, sizeof(p), "%.0f", s.bbwPctl);
-  drawSmooth(X + 10, Y + 22, p, deep ? C_ORANGE : C_WHITE, C_PANEL);
+  // (V5 : chiffres remontés, ils chevauchaient la jauge)
+  drawSmooth(X + 10, Y + 14, p, deep ? C_ORANGE : C_WHITE, C_PANEL);
   gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-  gfx->setCursor(X + 14 + smoothWidth(p), Y + 48); gfx->print("pctl 120j");
+  gfx->setCursor(X + 14 + smoothWidth(p), Y + 40); gfx->print("pctl 120j");
   // jauge percentile (inversee : gauche = comprime)
   gfx->fillRoundRect(X + 10, Y + 62, 132, 8, 4, C_BG);
-  int bw = (int)(132 * (100.0f - s.bbwPctl) / 100.0f);
+  int bw = (int)(132 * (100.0f - s.bbwPctl) / 100.0f * fxEnter(900));
   if (bw > 5) gfx->fillRoundRect(X + 10, Y + 62, bw, 8, 4, deep ? C_ORANGE : C_DGREY);
   // pastilles stack D / W + duree
   gfx->fillCircle(X + 16, Y + 84, 5, s.sqD ? C_ORANGE : C_BG);
@@ -245,17 +253,20 @@ static void drawPanelSqueezeCal(int X, int Y) {          // 152 x 116
 
 static void drawPanelDirectionCal(int X, int Y) {        // 460 x 64
   gfx->fillRoundRect(X, Y, 460, 64, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(X + 10, Y + 8); gfx->print("DIRECTION (frequences historiques 2017-, pas une promesse)");
+  gfx->setTextSize(1); gfx->setTextColor(C_GREY); gfx->setCursor(X + 10, Y + 8); gfx->print("DIRECTION (frequences historiques 2017-, pas une promesse)");
   SigState s; portENTER_CRITICAL(&dataMux); s = sig; portEXIT_CRITICAL(&dataMux);
   if (!s.ready) { gfx->setCursor(X + 10, Y + 34); gfx->print("calcul..."); return; }
   bool up = s.momPct >= 0;
   uint16_t cd = up ? C_GREEN : C_RED;
-  // fleche + momentum
-  drawArrow(X + 14, Y + 30, up, cd);
+  // V5 : momentum en taille 2 (les chiffres lissés débordaient du panneau de 64 px)
+  drawArrow(X + 12, Y + 24, up, cd);
   char m[16]; snprintf(m, sizeof(m), "%s%.1f%%", up ? "+" : "", s.momPct);
-  int mw = drawSmooth(X + 34, Y + 20, m, cd, C_PANEL);
+  gfx->setTextSize(2); gfx->setTextColor(cd);
+  gfx->setCursor(X + 30, Y + 22); gfx->print(m);
   gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-  gfx->setCursor(X + 38 + mw, Y + 46); gfx->print("mom TTM");
+  gfx->setCursor(X + 36 + (int)strlen(m) * 12, Y + 26); gfx->print("mom TTM");
+  gfx->setCursor(X + 10, Y + 44); gfx->print(s.dirCtx);
+  if (s.regimeOk) { gfx->setCursor(X + 10, Y + 54); gfx->print("regime 90j aligne"); }
   // probas calibrees 7j / 30j : barres + n
   const CalRow *rows[2] = { &s.dir7, &s.dir30 };
   const char *labs[2] = { "7j", "30j" };
@@ -266,7 +277,7 @@ static void drawPanelDirectionCal(int X, int Y) {        // 460 x 64
     gfx->fillRoundRect(bx + 24, Y + 20, 80, 10, 4, C_BG);
     // 50% = neutre : on ne remplit que l'EDGE au-dela du hasard
     int e = pd - 50; if (e < 0) e = 0;
-    if (e > 1) gfx->fillRoundRect(bx + 24 + 40, Y + 20, (int)(40 * e / 25.0f), 10, 4, cd);
+    if (e > 1) gfx->fillRoundRect(bx + 24 + 40, Y + 20, max(4, (int)(min(40.0f, 40 * e / 25.0f) * fxEnter(900))), 10, 4, cd);
     gfx->drawFastVLine(bx + 64, Y + 18, 14, C_DGREY);   // repere 50%
     if (pd <= 52 && pd >= 48) {                          // zone de bruit : neutre
       gfx->setTextColor(C_GREY);
@@ -278,6 +289,4 @@ static void drawPanelDirectionCal(int X, int Y) {        // 460 x 64
     gfx->setTextColor(C_DGREY);
     gfx->setCursor(bx + 24, Y + 48); gfx->printf("n=%d", rows[i]->n);
   }
-  gfx->setTextColor(C_DGREY);
-  gfx->setCursor(X + 10, Y + 56); gfx->printf("contexte: %s%s", s.dirCtx, s.regimeOk ? " (regime 90j aligne)" : "");
 }
