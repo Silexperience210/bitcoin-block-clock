@@ -144,6 +144,46 @@ Horloge Bitcoin vitrine sur carte Guition JC3248W535 (ESP32-S3 N16R8 + écran 3.
 - ⚠️ À mesurer sur la carte : FPS (≈ 67 000 échantillons sol/plafond/mur par
   image en PSRAM). Si c'est trop lent : `#define DV_COLS 160` dans doom.h (colonnes de 3 px, ~1/3 de calcul en moins).
 
+### V5.2 — prédiction / IA : vérification et refonte honnête
+Vérifié sur l'historique BTCUSDT 1d (2017-08 -> 2026-09, 3 326 jours) :
+- **Compte à rebours "prochain bloc" supprimé** : faux (processus de Poisson
+  sans mémoire). Page IA : temps écoulé + sa **rareté** `1 - exp(-t/λ)`,
+  médiane `λ·ln2`, 6 confirmations `≈ λ·(6 - 1/3)` (Erlang), P(bloc ≤ 1/5/10 min).
+  La ligne de vie du header et la barre on-chain suivent la rareté (rouge ≥ 95 %).
+- **Délai de confirmation par fee** : `/api/v1/fees/mempool-blocks` (blocs
+  projetés : médiane, quantiles `feeRange`, vsize) -> `feeBlocksFor(f)` puis
+  délai médian (Erlang). Remplace la régression sur `fastestFee` (dents de scie).
+  Le bloc "en attente" de la frise affiche le vrai prochain bloc (fee médiane, nb de tx, remplissage).
+- **Fees décimales** : `/api/v1/fees/precise` (les fees < 1 sat/vB sont courantes ;
+  l'ancien parsing entier les arrondissait).
+- **Cycles de fees** : 1 mise à jour PAR HEURE (médiane des échantillons de
+  l'heure), moyenne géométrique sur les semaines (poids 1/n puis 0,25), compteur
+  `feeWk[168]` en NVS ; créneau "fiable" à partir de 2 semaines ; creux détecté
+  sur moyenne glissante 3 h. Avant : α = 0,15 par échantillon -> la dernière heure
+  visitée pesait 99 %. Grandeur apprise = médiane du prochain bloc projeté ;
+  version NVS `feever = 2` (anciens créneaux remis à zéro).
+- **Anomalies** : `anomUpdate()` sur le LOG, variance plancher, 30 mesures de
+  chauffe, pics seulement (z > 3 sur 2 mesures consécutives). Avant : variance
+  initiale 0 -> z = ±5,6 dès la 2e mesure -> alarme à chaque démarrage. Alerte
+  "VOL" à 3 σ (2 σ = ~5 % du temps).
+- **Parité signals.h / calibration** : momentum TTM avec milieu recalculé à
+  chaque barre (même tercile que Python 100 % vs 81 % avant), dernière bougie
+  CLOSE (`L = n - 2`, jour UTC lu dans l'open time Binance). Contrôle :
+  `tools/sim` mode `sigcheck` (momentum 100 %, squeeze 99,8 %, vol identique).
+- **Direction** : `calibrate_squeeze.py` v2 -> n INDÉPENDANT (1 évènement / H
+  jours) + IC 95 % de Wilson dans `signals_calib.h`. Le panneau dessine l'IC
+  sur 0-100 % ; s'il contient 50 % -> "pas d'avantage" (c'est le cas de TOUTES
+  les lignes aujourd'hui). Contexte "squeeze D+W" ignoré (6 cas indépendants).
+  Bug corrigé : p_dir < 50 s'affichait "41 % hausse" au lieu de "59 % baisse".
+- **Amplitude prévue** (ce qui se prévoit vraiment) : volatilité EWMA(0,94) +
+  quantiles EMPIRIQUES des rendements normalisés (queues épaisses, asymétrie)
+  pour 2 / 7 / 30 j ; couverture hors-échantillon (walk-forward 60/40) 79-82 %
+  pour 80 % visés. Panneau "AMPLITUDE PRÉVUE" (remplace "HAUSSIER/BAISSIER",
+  non calibré) + **cône 50 %/80 % sur le graphe** (vue 7J : +2 j, vue 30J : +7 j).
+- **Auto-contrôle** : chaque jour la fourchette 80 % à 7 j est notée (NVS `vp`),
+  vérifiée à J+7 sur la clôture réelle : "tenue X fois sur Y (visé 80 %)".
+- Le MLP `trend_model.h` reste hors firmware (test < baseline, cf. leçon ML).
+
 ### Budget V5
 - Compile : **40 % flash, 26 % RAM** (core 2.0.14, GFX 1.4.9, `--warnings all` : 0 warning).
 - PSRAM : framebuffer 300 Ko + 2 × 300 Ko (transitions).

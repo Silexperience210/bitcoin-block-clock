@@ -1,5 +1,8 @@
 # PATCH SIGNAUX v2 — momentum & direction calibrés (vue large)
 
+> **V5.2** : parité corrigée (momentum, bougie close), n indépendant + IC 95 %
+> dans la calibration, panneau "amplitude prévue" — voir PROJET-NOTES.md.
+>
 > **Statut V5 : INTÉGRÉ.** `signals.h` est inclus dans le sketch (il ne l'était
 > pas en V4 : la page Signaux v2 n'était jamais compilée), `REQ_SIGNALS` +
 > fetch toutes les 4 h dans `netTask`, panneaux calibrés affichés. Correctifs

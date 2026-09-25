@@ -10,6 +10,10 @@ public:
   uint8_t getUChar(const char *, uint8_t d = 0) { return d; }
   int32_t getInt(const char *, int32_t d = 0) { return d; }
   int32_t getLong(const char *, int32_t d = 0) { return d; }
+  uint16_t getUShort(const char *, uint16_t d = 0) { return d; }
+  uint32_t getULong(const char *, uint32_t d = 0) { return d; }
+  size_t putUShort(const char *, uint16_t) { return 2; }
+  size_t putULong(const char *, uint32_t) { return 4; }
   bool getBool(const char *, bool d = false) { return d; }
   size_t getBytes(const char *, void *, size_t) { return 0; }
   size_t putString(const char *, const String &) { return 1; }

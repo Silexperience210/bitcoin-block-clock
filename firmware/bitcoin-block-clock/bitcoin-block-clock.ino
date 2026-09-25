@@ -47,6 +47,7 @@
 #include <Arduino_GFX_Library.h>
 #include "btc_logo.h"
 #include "smooth_font.h"
+#include "signals_calib.h"   // tables calibrées (cône de volatilité du graphe + page Signaux)
 
 // ---------- synthèse vocale SAM (Software Automatic Mouth, s-macke/SAM) ----------
 extern "C" {
@@ -193,19 +194,32 @@ float  dispPrice = 0;       // prix affiché (animé vers btcPrice[curCur])
 float  btcChg24 = 0;
 long   blockHeight = 0;
 long   mempoolCount = 0;
-int    feeFast = 0, feeHalf = 0, feeHour = 0, feeEco = 0;
+// fees en sat/vB AVEC décimales (/fees/precise) : les fees sous 1 sat/vB sont
+// devenues courantes, l'ancien parsing entier (/recommended) les arrondissait
+float  feeFast = 0, feeHalf = 0, feeHour = 0, feeEco = 0, feeMin = 0;
+// ---- blocs projetés du mempool (/fees/mempool-blocks) : file d'attente réelle ----
+#define PB_N 8
+#define PB_Q 12
+float  pbMed[PB_N] = {0}, pbVsize[PB_N] = {0};
+float  pbRng[PB_N][PB_Q];     // feeRange : quantiles de fee du bloc (min .. max)
+uint8_t pbRngN[PB_N] = {0};
+long   pbTx[PB_N] = {0};
+int    pbN = 0;
 // ---- moteur prédictif on-device (page IA) ----
 long   blkTs[6] = {0};        // timestamps des derniers blocs (Poisson)
 int    blkTsN = 0;
-int    feeHist[32];           // ring buffer feeFast (échantillon ~2 min)
-int    feeHistN = 0, feeHistIdx = 0;
-// ---- cycles de fees appris en continu (168 créneaux heure×jour, NVS) ----
-float  feeBkt[168] = {0};     // moyenne EMA par créneau (0 = pas encore appris)
-long   feeSamples = 0;        // nb total d'échantillons appris
+// ---- cycles de fees (168 créneaux heure×jour, NVS) ----
+// V5.2 : 1 mise à jour PAR HEURE (médiane de l'heure), moyenne sur les
+// semaines (poids 1/n puis 0,25) — avant, la dernière heure pesait 99 %.
+float  feeBkt[168] = {0};     // fee médiane du prochain bloc, par créneau (0 = inconnu)
+uint8_t feeWk[168] = {0};     // nb de semaines apprises par créneau
+long   feeSamples = 0;        // nb total d'échantillons
 bool   feeBktDirty = false;
-// ---- détection d'anomalies (stats EMA, RAM) ----
-float  anomMemAvg = 0, anomMemVar = 0, anomMemZ = 0;
-float  anomFeeAvg = 0, anomFeeVar = 0, anomFeeZ = 0;
+float  feeHrBuf[40];          // échantillons de l'heure en cours
+int    feeHrN = 0, feeHrB = -1;
+// ---- détection d'anomalies robuste (log, plancher de variance, chauffe) ----
+struct AnomStat { float avg, var, z; uint16_t n; uint8_t hot; };
+AnomStat anMem = {0, 0, 0, 0, 0}, anFee = {0, 0, 0, 0, 0};
 bool   anomActive = false;    // latch événementiel (reset quand z < 1.5)
 volatile bool evAnomaly = false;
 char   lastPool[32] = "-";
@@ -748,8 +762,13 @@ void loadConfig() {
   sndVolPct  = prefs.getUChar("sndvol", 100);
   animLevel  = min((uint8_t)2, prefs.getUChar("anim", 2));
   feeSamples = prefs.getLong("feesmp", 0);
-  if (prefs.getBytes("feebkt", feeBkt, sizeof(feeBkt)) != sizeof(feeBkt))
-    memset(feeBkt, 0, sizeof(feeBkt));
+  bool okB = prefs.getBytes("feebkt", feeBkt, sizeof(feeBkt)) == sizeof(feeBkt);
+  bool okW = prefs.getBytes("feewk", feeWk, sizeof(feeWk)) == sizeof(feeWk);
+  // v2 : autre grandeur apprise (médiane du prochain bloc, décimale) ->
+  // les anciens créneaux (fastestFee entier, EMA) sont repartis de zéro
+  if (!okB || !okW || prefs.getUChar("feever", 1) != 2) {
+    memset(feeBkt, 0, sizeof(feeBkt)); memset(feeWk, 0, sizeof(feeWk)); feeSamples = 0;
+  }
   prefs.end();
 }
 
@@ -757,6 +776,8 @@ void loadConfig() {
 void saveFeeBuckets() {
   prefs.begin("bc", false);
   prefs.putBytes("feebkt", feeBkt, sizeof(feeBkt));
+  prefs.putBytes("feewk", feeWk, sizeof(feeWk));
+  prefs.putUChar("feever", 2);
   prefs.putLong("feesmp", feeSamples);
   prefs.end();
   feeBktDirty = false;
@@ -973,59 +994,102 @@ void fetchHeight() {
   dataOk = true;
 }
 
+// ---- détection d'anomalie robuste ----
+// sur le LOG de la valeur (un pic x2 compte pareil à 3 ou à 30 sat/vB),
+// variance plancher (pas de z géant quand tout est calme), 30 échantillons
+// de chauffe (~1 h) — FIX : l'ancienne version (variance initiale 0)
+// donnait z = ±5,6 dès la 2e mesure -> alarme sonore à chaque démarrage.
+void anomUpdate(AnomStat &a, float x, float sdFloor) {
+  if (a.n == 0) { a.avg = x; a.var = sdFloor * sdFloor; }
+  else { float d = x - a.avg; a.avg += 0.03f * d; a.var = 0.97f * (a.var + 0.03f * d * d); }
+  if (a.n < 60000) a.n++;
+  float sd = max(sqrtf(a.var), sdFloor);
+  a.z = a.n >= 30 ? (x - a.avg) / sd : 0;
+  a.hot = (a.z > 3.0f) ? (uint8_t)min(10, a.hot + 1) : 0;   // PICS seulement, 2 mesures de suite
+}
+
 // ---- Mempool + fees ----
 void fetchMempool() {
   String r;
   if (!httpGet("https://mempool.space/api/mempool", r)) return;
+  JsonDocument filter; filter["count"] = true;
+  JsonDocument doc;
+  if (deserializeJson(doc, r, DeserializationOption::Filter(filter))) return;
+  mempoolCount = doc["count"] | 0L;
+  portENTER_CRITICAL(&dataMux);
+  if (mempoolCount > 0) anomUpdate(anMem, logf((float)mempoolCount), 0.08f);
+  portEXIT_CRITICAL(&dataMux);
+}
+
+// blocs projetés : pour chaque bloc à venir, médiane + quantiles de fee et
+// taille. C'est la file d'attente réelle -> délais de confirmation (page IA)
+void fetchMempoolBlocks() {
+  String r;
+  if (!httpGet("https://mempool.space/api/v1/fees/mempool-blocks", r)) return;
   JsonDocument doc;
   if (deserializeJson(doc, r)) return;
-  mempoolCount = doc["count"] | 0L;
-  // stats EMA pour la détection d'anomalie mempool
-  portENTER_CRITICAL(&dataMux);
-  if (anomMemAvg == 0) { anomMemAvg = mempoolCount; anomMemVar = 0; }
-  else {
-    float d = mempoolCount - anomMemAvg;
-    anomMemAvg += 0.03f * d;
-    anomMemVar = 0.97f * anomMemVar + 0.03f * d * d;
+  float med[PB_N], vs[PB_N], rng[PB_N][PB_Q]; uint8_t rn[PB_N]; long tx[PB_N]; int n = 0;
+  for (JsonObject b : doc.as<JsonArray>()) {
+    if (n >= PB_N) break;
+    med[n] = b["medianFee"] | 0.0f; vs[n] = b["blockVSize"] | 0.0f; tx[n] = b["nTx"] | 0L;
+    int k = 0;
+    for (JsonVariant v : b["feeRange"].as<JsonArray>()) { if (k < PB_Q) rng[n][k++] = v.as<float>(); }
+    rn[n] = k;
+    if (k >= 2) n++;
   }
-  anomMemZ = anomMemVar > 0 ? (mempoolCount - anomMemAvg) / sqrtf(anomMemVar) : 0;
+  portENTER_CRITICAL(&dataMux);
+  memcpy(pbMed, med, sizeof(med)); memcpy(pbVsize, vs, sizeof(vs)); memcpy(pbTx, tx, sizeof(tx));
+  memcpy(pbRng, rng, sizeof(rng)); memcpy(pbRngN, rn, sizeof(rn)); pbN = n;
   portEXIT_CRITICAL(&dataMux);
+}
+
+static float medianOf(float *v, int n) {
+  for (int i = 1; i < n; i++) { float k = v[i]; int j = i - 1; while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; } v[j + 1] = k; }
+  return n % 2 ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
 }
 
 void fetchFees() {
   String r;
-  if (!httpGet("https://mempool.space/api/v1/fees/recommended", r)) return;
+  if (!httpGet("https://mempool.space/api/v1/fees/precise", r) &&
+      !httpGet("https://mempool.space/api/v1/fees/recommended", r)) return;
   JsonDocument doc;
   if (deserializeJson(doc, r)) return;
-  feeFast = doc["fastestFee"] | 0;
-  feeHalf = doc["halfHourFee"] | 0;
-  feeHour = doc["hourFee"] | 0;
-  feeEco  = doc["economyFee"] | 0;
-  if (feeFast > 0) {          // historique pour la régression (page IA)
-    portENTER_CRITICAL(&dataMux);
-    feeHist[feeHistIdx] = feeFast;
-    feeHistIdx = (feeHistIdx + 1) % 32;
-    if (feeHistN < 32) feeHistN++;
-    // stats EMA pour la détection d'anomalie fees
-    if (anomFeeAvg == 0) { anomFeeAvg = feeFast; anomFeeVar = 0; }
-    else {
-      float d = feeFast - anomFeeAvg;
-      anomFeeAvg += 0.03f * d;
-      anomFeeVar = 0.97f * anomFeeVar + 0.03f * d * d;
+  feeFast = doc["fastestFee"] | 0.0f;
+  feeHalf = doc["halfHourFee"] | 0.0f;
+  feeHour = doc["hourFee"] | 0.0f;
+  feeEco  = doc["economyFee"] | 0.0f;
+  feeMin  = doc["minimumFee"] | 0.0f;
+  if (feeFast <= 0) return;
+  // grandeur apprise : médiane du PROCHAIN bloc projeté (continue, décimale) ;
+  // à défaut, fastestFee
+  float v;
+  portENTER_CRITICAL(&dataMux);
+  v = (pbN > 0 && pbMed[0] > 0) ? pbMed[0] : feeFast;
+  anomUpdate(anFee, logf(max(0.01f, v)), 0.15f);
+  portEXIT_CRITICAL(&dataMux);
+  // cycles : on accumule l'heure en cours, et à chaque changement d'heure on
+  // intègre sa MÉDIANE au créneau (moyenne géométrique sur les semaines)
+  struct tm t;
+  if (getLocalTime(&t, 50)) {
+    int b = constrain(t.tm_wday * 24 + t.tm_hour, 0, 167);
+    if (b != feeHrB) {
+      if (feeHrB >= 0 && feeHrN >= 6) {
+        float med = medianOf(feeHrBuf, feeHrN);
+        portENTER_CRITICAL(&dataMux);
+        uint8_t w = feeWk[feeHrB];
+        if (w == 0 || feeBkt[feeHrB] <= 0) feeBkt[feeHrB] = med;
+        else {
+          float al = max(0.25f, 1.0f / (w + 1));
+          feeBkt[feeHrB] = expf((1 - al) * logf(feeBkt[feeHrB]) + al * logf(max(0.01f, med)));
+        }
+        if (w < 255) feeWk[feeHrB] = w + 1;
+        feeBktDirty = true;
+        portEXIT_CRITICAL(&dataMux);
+      }
+      feeHrB = b; feeHrN = 0;
     }
-    anomFeeZ = anomFeeVar > 0 ? (feeFast - anomFeeAvg) / sqrtf(anomFeeVar) : 0;
-    portEXIT_CRITICAL(&dataMux);
-    // apprentissage du créneau horaire (cycles hebdo, persisté en NVS)
-    struct tm t;
-    if (getLocalTime(&t, 50)) {
-      int b = constrain(t.tm_wday * 24 + t.tm_hour, 0, 167);
-      portENTER_CRITICAL(&dataMux);
-      if (feeBkt[b] <= 0) feeBkt[b] = feeFast;
-      else feeBkt[b] = feeBkt[b] * 0.85f + feeFast * 0.15f;
-      feeSamples++;
-      feeBktDirty = true;
-      portEXIT_CRITICAL(&dataMux);
-    }
+    if (feeHrN < 40) feeHrBuf[feeHrN++] = v;
+    feeSamples++;
   }
 }
 
@@ -1201,7 +1265,7 @@ void netTask(void *param) {
 
     if ((req & REQ_HEIGHT)  || now - tHeight  > 20000)   { tHeight = now;  fetchHeight(); worked = true; }
     if ((req & REQ_PRICE)   || now - tPrice   > 30000)   { tPrice = now;   fetchPrice(); worked = true; }
-    if ((req & REQ_MEMPOOL) || now - tMempool > 120000)  { tMempool = now; fetchMempool(); fetchFees(); fetchLastBlock(); worked = true; }
+    if ((req & REQ_MEMPOOL) || now - tMempool > 120000)  { tMempool = now; fetchMempool(); fetchMempoolBlocks(); fetchFees(); fetchLastBlock(); worked = true; }
     if ((req & REQ_WHALE)   || now - tWhale   > 60000)   { tWhale = now;   fetchWhale(); worked = true; }
     if ((req & REQ_KLINES)  || now - tKlines  > 300000)  { tKlines = now;  fetchKlines(); worked = true; }
     if ((req & REQ_KL30)    || now - tKl30    > 1800000) { tKl30 = now;    if (curTf != TF_30J) fetchKlinesView(curCur, TF_30J); if (curTf != TF_7J) fetchKlinesView(curCur, TF_7J); worked = true; }
@@ -1222,9 +1286,10 @@ void netTask(void *param) {
     if (feeBktDirty && now - tBktSave > 1800000) { tBktSave = now; saveFeeBuckets(); }
 
     // latch détection d'anomalies (z > 2.5 -> event, reset z < 1.5)
-    bool an = (fabsf(anomMemZ) > 2.5f || fabsf(anomFeeZ) > 2.5f);
+    // pic confirmé sur 2 mesures consécutives (z > 3, valeurs en log)
+    bool an = (anMem.hot >= 2 || anFee.hot >= 2);
     if (an && !anomActive) { anomActive = true; evAnomaly = true; }
-    else if (!an && anomActive && fabsf(anomMemZ) < 1.5f && fabsf(anomFeeZ) < 1.5f) anomActive = false;
+    else if (!an && anomActive && anMem.z < 1.5f && anFee.z < 1.5f) anomActive = false;
 
     if (worked) needRedraw = true;
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -1389,6 +1454,52 @@ long secsSinceBlock() {
   return max(0L, (long)now - t0);
 }
 
+// ---- statistiques "sans mémoire" des blocs (processus de Poisson) ----
+float blockLambda() { return lambdaEpoch > 0 ? (float)lambdaEpoch : 600.0f; }
+// part des blocs trouvés PLUS VITE que l'attente actuelle : 1 - exp(-t/λ).
+// (le minage n'a pas de mémoire : l'attente restante ne diminue PAS avec le
+//  temps écoulé ; seule la rareté de l'attente actuelle a un sens)
+float blockRarity(long el) { return el < 0 ? 0.0f : 1.0f - expf(-(float)el / blockLambda()); }
+
+// nb de blocs estimé avant l'inclusion d'une tx à f sat/vB, d'après les blocs
+// projetés du mempool (file ACTUELLE, sans nouvelles arrivées : estimation
+// optimiste). < 0 : sous toute la file (-(nb de blocs de la file + 1)).
+float feeBlocksFor(float f) {
+  float vs[PB_N], rng[PB_N][PB_Q]; uint8_t rn[PB_N]; int n;
+  portENTER_CRITICAL(&dataMux);
+  n = pbN; memcpy(vs, pbVsize, sizeof(vs)); memcpy(rng, pbRng, sizeof(rng)); memcpy(rn, pbRngN, sizeof(rn));
+  portEXIT_CRITICAL(&dataMux);
+  float acc = 0;
+  for (int i = 0; i < n; i++) {
+    int k = rn[i];
+    float nb = max(1.0f, vs[i] / 1.0e6f);                 // le dernier bloc projeté agrège le reste
+    if (f >= rng[i][0]) {
+      if (nb <= 1.01f) return acc + 1;
+      float q = 1.0f;                                      // position de f dans les quantiles du bloc
+      for (int j = 0; j < k - 1; j++)
+        if (f < rng[i][j + 1]) { float fr = (f - rng[i][j]) / max(1e-6f, rng[i][j + 1] - rng[i][j]); q = (j + fr) / (k - 1); break; }
+      return acc + max(1.0f, (1.0f - q) * nb);
+    }
+    acc += nb;
+  }
+  return -(acc + 1);
+}
+// délai MÉDIAN pour k blocs (loi d'Erlang) ≈ λ (k - 1/3) ; k = 1 -> λ ln 2
+void fmtEta(char *o, size_t sz, float blocks) {
+  float lam = blockLambda();
+  if (blocks < 0) { snprintf(o, sz, "> %.0fh", -blocks * lam / 3600.0f); return; }
+  float sec = blocks <= 1.0f ? lam * 0.693f : lam * (blocks - 0.333f);
+  long m = lroundf(sec / 60.0f);
+  if (m < 60) snprintf(o, sz, "~%ld min", max(1L, m));
+  else if (m < 48 * 60) snprintf(o, sz, "~%ldh%02ld", m / 60, m % 60);
+  else snprintf(o, sz, "~%ld j", m / 1440);
+}
+void fmtFee(char *o, size_t sz, float f) {
+  if (f <= 0) strlcpy(o, "-", sz);
+  else if (f < 10) snprintf(o, sz, "%.1f", f);
+  else snprintf(o, sz, "%.0f", f);
+}
+
 void drawHeader() {
   // fond : dégradé vertical discret
   for (int y = 0; y < 26; y++) gfx->drawFastHLine(0, y, SCR_W, mix565(C_PANEL, C_BG, (uint8_t)(y * 255 / 25)));
@@ -1441,13 +1552,16 @@ void drawHeader() {
   gfx->setCursor(444 + (28 - (int)strlen(bps) * 6) / 2, 9);
   gfx->print(bps);
 
-  // ---- LIGNE DE VIE DU BLOC : progression vers ~10 min + comète ----
+  // ---- LIGNE DE VIE DU BLOC ----
+  // longueur = part des blocs trouvés plus vite que l'attente actuelle
+  // (65 % à ~10 min) ; rouge au-delà de 95 % = attente vraiment rare.
+  // (V5.2 : l'ancienne "progression vers 10 min" suggérait un bloc "dû")
   gfx->drawFastHLine(0, 26, SCR_W, C_LINE);
   long el = secsSinceBlock();
   if (el >= 0) {
-    float k = el / 600.0f;
-    bool late = k > 1.0f;                                     // > 10 min : vire au rouge
-    int w = (int)(SCR_W * clamp01(k));
+    float k = blockRarity(el);
+    bool late = k >= 0.95f;
+    int w = (int)(SCR_W * k);
     uint16_t c = late ? mix565(C_ORANGE, C_RED, u8f(fxFull() ? fxPulse(1600) : 1.0f)) : C_ORANGE;
     for (int x = 0; x < w; x += 8)
       gfx->drawFastHLine(x, 26, min(8, w - x), mix565(C_ORANGE_D, c, (uint8_t)(x * 255 / max(1, w))));
@@ -1553,6 +1667,8 @@ void drawFooter() {
 // drawChart V5 : aire en VRAI dégradé (bandes), ligne avec lueur, grille,
 // tracé qui "se dessine" à chaque nouvelle série, point final pulsant.
 unsigned long chartAnimMs = 0;
+int chartHistW = GW - 10;          // largeur (px) de la partie HISTORIQUE (le cône prend le reste)
+static void chartVolSnap(bool *ok, float *volD);   // défini après signals.h
 
 void drawChart() {
   gfx->fillRoundRect(GX - 6, GY - 8, GW + 12, GH + 40, 8, C_PANEL);
@@ -1581,11 +1697,28 @@ void drawChart() {
 
   float mn = c[0], mx = c[0];
   for (int i = 1; i < n; i++) { if (c[i] < mn) mn = c[i]; if (c[i] > mx) mx = c[i]; }
+
+  // ---- cône de volatilité (vues 7J / 30J) : fourchettes 50 % / 80 % calibrées ----
+  // horizon = 2 j sur la vue 7J, 7 j sur la vue 30J ; la partie droite du graphe
+  // lui est réservée au prorata du temps
+  bool volOk = false; float volD = 0;
+  chartVolSnap(&volOk, &volD);
+  int coneQ = -1; float coneH = 0, perD = 0;
+  if (volOk && volD > 0 && (curTf == TF_7J || curTf == TF_30J)) {
+    coneQ = curTf == TF_30J ? 1 : 0; coneH = VOL_H[coneQ]; perD = curTf == TF_30J ? 30 : 7;
+  }
+  chartHistW = coneQ >= 0 ? (int)((GW - 10) * perD / (perD + coneH)) : GW - 10;
+  const float pNow = c[n - 1];
+  if (coneQ >= 0) {
+    float sH = volD * sqrtf(coneH);
+    mn = min(mn, pNow * expf(VOL_Q[coneQ][0] * sH));
+    mx = max(mx, pNow * expf(VOL_Q[coneQ][4] * sH));
+  }
   float range = (mx - mn); if (range < 0.01f) range = 0.01f;
 
   auto yOf = [&](float v) { return GY + GH - 6 - (int)((v - mn) / range * (GH - 14)); };
-  auto xOf = [&](int i) { return GX + 4 + (int)((long)i * (GW - 10) / (n - 1)); };
-  const int xRev = GX + 4 + (int)((GW - 10) * kr);       // abscisse déjà tracée
+  auto xOf = [&](int i) { return GX + 4 + (int)((long)i * chartHistW / (n - 1)); };
+  const int xRev = GX + 4 + (int)(chartHistW * kr);       // abscisse déjà tracée
   bool up = c[n - 1] >= c[0];
   uint16_t lc = up ? C_GREEN : C_RED;
 
@@ -1628,12 +1761,31 @@ void drawChart() {
   }
   if (kr < 1.0f) {
     // tête lumineuse pendant le tracé
-    int i = constrain((int)((long)(xRev - GX - 4) * (n - 1) / (GW - 10)), 0, n - 2);
+    int i = constrain((int)((long)(xRev - GX - 4) * (n - 1) / chartHistW), 0, n - 2);
     int x0 = xOf(i), x1 = xOf(i + 1);
     int yh = yOf(c[i]) + (int)((long)(yOf(c[i + 1]) - yOf(c[i])) * (xRev - x0) / max(1, x1 - x0));
     fxHalo(xRev, yh, 10, lc, C_PANEL, 150, 2);
     gfx->fillCircle(xRev, yh, 3, C_WHITE);
   } else {
+    // cône : pour chaque colonne future, fourchettes à l'horizon h
+    if (coneQ >= 0) {
+      int x0 = xOf(n - 1), x1 = GX + GW - 6;
+      float ck = fxFull() ? clamp01((long)(fxT - chartAnimMs - 900) / 600.0f) : 1.0f;
+      uint16_t c80 = mix565(C_PANEL, C_ORANGE, (uint8_t)(55 * ck)), c50 = mix565(C_PANEL, C_ORANGE, (uint8_t)(120 * ck));
+      for (int x = x0 + 1; x <= x1; x++) {
+        float sh = volD * sqrtf(coneH * (x - x0) / (float)max(1, x1 - x0));
+        int a80 = yOf(pNow * expf(VOL_Q[coneQ][4] * sh)), b80 = yOf(pNow * expf(VOL_Q[coneQ][0] * sh));
+        int a50 = yOf(pNow * expf(VOL_Q[coneQ][3] * sh)), b50 = yOf(pNow * expf(VOL_Q[coneQ][1] * sh));
+        gfx->drawFastVLine(x, a80, max(1, b80 - a80), c80);
+        gfx->drawFastVLine(x, a50, max(1, b50 - a50), c50);
+        if ((x & 3) == 0) gfx->drawPixel(x, yOf(pNow * expf(VOL_Q[coneQ][2] * sh)), mix565(C_PANEL, C_WHITE, (uint8_t)(160 * ck)));
+      }
+      for (int y = GY; y < GY + GH - 4; y += 4) gfx->drawPixel(x0, y, C_GREY);
+      gfx->setTextSize(1); gfx->setTextColor(mix565(C_PANEL, C_ORANGE, (uint8_t)(200 * ck)));
+      char lb[16]; snprintf(lb, sizeof(lb), "+%dj", (int)coneH);
+      gfx->setCursor(x1 - (int)strlen(lb) * 6, GY + GH - 10); gfx->print(lb);
+      gfx->setCursor(x1 - 18, GY + 2); gfx->print("80%");
+    }
     // dernier point : onde qui pulse ("live")
     int xl = xOf(n - 1), yl = yOf(c[n - 1]);
     if (fxFull()) {
@@ -1780,10 +1932,15 @@ void drawMinedBlock(int x, int i, long h, float fee, long tx, long ts, const cha
 // bloc en attente : "liquide" qui monte avec le temps écoulé, vagues + bulles
 void drawPendingBlock(long el) {
   const int x = 14, y = BLK_Y, w = BLK_W, d = BLK_D;
-  uint16_t fc = feeColor((float)feeFast);
+  float pMed; long pTx; float pVs;
+  portENTER_CRITICAL(&dataMux);
+  pMed = pbN > 0 ? pbMed[0] : feeFast; pTx = pbN > 0 ? pbTx[0] : 0; pVs = pbN > 0 ? pbVsize[0] : 0;
+  portEXIT_CRITICAL(&dataMux);
+  uint16_t fc = feeColor(pMed);
   blockShell(x, y, w, d, mix565(C_PANEL, fc, 60), mix565(C_BG, fc, 45));
   gfx->fillRect(x, y, w, w, mix565(C_BG, C_PANEL, 160));
-  float lvl = el >= 0 ? 0.06f + 0.94f * clamp01(el / 600.0f) : 0.3f;
+  // niveau = remplissage RÉEL du prochain bloc projeté (vsize / 1 MvB)
+  float lvl = pVs > 0 ? 0.06f + 0.94f * clamp01(pVs / 1.0e6f) : (el >= 0 ? 0.06f + 0.94f * blockRarity(el) : 0.3f);
   float t = fxFull() ? fxT / 1000.0f : 0;
   for (int xx = 0; xx < w; xx++) {
     float wv = sinf(xx * 0.19f + t * 3.1f) * 2.2f + sinf(xx * 0.07f - t * 1.7f) * 1.6f;
@@ -1805,17 +1962,22 @@ void drawPendingBlock(long el) {
   }
   gfx->drawRect(x, y, w, w, mix565(C_BG, C_ORANGE, u8f(fxFull() ? 0.45f + 0.55f * fxPulse(1400) : 1.0f)));
   // textes
-  char fs[10]; snprintf(fs, sizeof(fs), "~%d", feeFast);
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
+  char fv[10], fs[12]; fmtFee(fv, sizeof(fv), pMed); snprintf(fs, sizeof(fs), "~%s", fv);
+  // textes avec ombre (lisibles même quand le "liquide" remplit le bloc)
+  gfx->setTextSize(2); gfx->setTextColor(C_BG);
+  gfx->setCursor(x + (w - (int)strlen(fs) * 12) / 2 + 1, y + 8); gfx->print(fs);
+  gfx->setTextColor(C_WHITE);
   gfx->setCursor(x + (w - (int)strlen(fs) * 12) / 2, y + 7); gfx->print(fs);
-  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
+  gfx->setTextSize(1); gfx->setTextColor(C_BG);
+  gfx->setCursor(x + (w - 36) / 2 + 1, y + 27); gfx->print("sat/vB");
+  gfx->setTextColor(C_WHITE);
   gfx->setCursor(x + (w - 36) / 2, y + 26); gfx->print("sat/vB");
-  long lam = lambdaEpoch > 0 ? lambdaEpoch : 600;
-  long rem = el >= 0 ? max(0L, (lam - el) / 60) : -1;
+  // FIX : plus de compte à rebours (faux : le minage est sans mémoire) ->
+  // nombre de tx du bloc projeté
   char rs[14];
-  if (rem < 0) strlcpy(rs, "...", sizeof(rs));
-  else if (rem == 0) strlcpy(rs, "imminent", sizeof(rs));
-  else snprintf(rs, sizeof(rs), "~%ld min", rem);
+  if (pTx > 0) snprintf(rs, sizeof(rs), "%ld tx", pTx); else strlcpy(rs, "...", sizeof(rs));
+  gfx->setTextColor(C_BG);
+  gfx->setCursor(x + (w - (int)strlen(rs) * 6) / 2 + 1, y + 45); gfx->print(rs);
   gfx->setTextColor(C_WHITE);
   gfx->setCursor(x + (w - (int)strlen(rs) * 6) / 2, y + 44); gfx->print(rs);
   gfx->setTextColor(C_ORANGE);
@@ -1849,8 +2011,8 @@ void drawPageChain() {
   // FIX : séparateurs ASCII (le "·" UTF-8 s'affichait en glyphes parasites)
   if (el >= 0) gfx->printf("il y a %ldm%02lds  -  %s  -  %ld tx", el / 60, el % 60, pool, btx);
   else gfx->print("en attente des donnees...");
-  float kp = el >= 0 ? el / 600.0f : 0;
-  fxBar(10, 102, 286, 6, kp, kp > 1 ? C_RED : C_ORANGE, C_PANEL);
+  float kp = blockRarity(el);                        // rareté de l'attente (cf. drawHeader)
+  fxBar(10, 102, 286, 6, kp, kp >= 0.95f ? C_RED : C_ORANGE, C_PANEL);
 
   // ---------- mempool (droite) ----------
   gfx->fillRoundRect(306, 32, 164, 76, 8, C_PANEL);
@@ -1882,8 +2044,8 @@ void drawPageChain() {
 
   // ---------- fees ----------
   const char* fl[4] = {"rapide", "30 min", "1 h", "eco"};
-  int fv[4] = {feeFast, feeHalf, feeHour, feeEco};
-  int fmax = max(1, feeFast);
+  float fv[4] = {feeFast, feeHalf, feeHour, feeEco};
+  float fmax = max(0.1f, feeFast);
   for (int i = 0; i < 4; i++) {
     int fx = 10 + i * 116, fy = 216;
     uint16_t c = feeColor((float)fv[i]);
@@ -1891,12 +2053,12 @@ void drawPageChain() {
     gfx->fillRoundRect(fx, fy + 4, 3, 26, 1, c);
     gfx->setTextSize(2); gfx->setTextColor(i == 0 ? C_ORANGE : C_WHITE);
     gfx->setCursor(fx + 10, fy + 5);
-    String v = fv[i] > 0 ? String(fv[i]) : String("-");
+    char v[10]; fmtFee(v, sizeof(v), fv[i]);
     gfx->print(v);
     gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-    gfx->setCursor(fx + 14 + v.length() * 12, fy + 11); gfx->print("sat/vB");
+    gfx->setCursor(fx + 14 + (int)strlen(v) * 12, fy + 11); gfx->print("sat/vB");
     gfx->setCursor(fx + 10, fy + 24); gfx->print(fl[i]);
-    int bh = (int)(24 * clamp01(fv[i] / (float)fmax) * fxEnter(700, i * 90));
+    int bh = (int)(24 * clamp01(fv[i] / fmax) * fxEnter(700, i * 90));
     gfx->fillRoundRect(fx + 96, fy + 5, 6, 24, 2, C_BG);
     if (bh > 1) gfx->fillRoundRect(fx + 96, fy + 29 - bh, 6, bh, 2, c);
   }
@@ -2018,7 +2180,7 @@ void drawPageNode() {
   gfx->setTextColor(C_GREY);
   gfx->setCursor(248, 192); gfx->printf("bloc : %ld", blockHeight);
   gfx->setCursor(248, 208); gfx->printf("mempool : %ld TX", mempoolCount);
-  gfx->setCursor(248, 224); gfx->printf("fee rapide : %d sat/vB", feeFast);
+  gfx->setCursor(248, 224); gfx->printf("fee rapide : %.1f sat/vB", feeFast);
   if (whaleBtc >= 50) {
     gfx->setTextColor(C_ORANGE);
     gfx->setCursor(248, 248); gfx->printf("baleine : %.0f BTC", whaleBtc);
@@ -2283,7 +2445,7 @@ void drawPageCube() {
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
   gfx->setCursor(SCR_W - 70, 34); gfx->print("FEE");
   gfx->setTextSize(2); gfx->setTextColor(C_ORANGE);
-  gfx->setCursor(SCR_W - 70, 46); gfx->printf("%d", feeFast);
+  { char fb[10]; fmtFee(fb, sizeof(fb), feeFast); gfx->setCursor(SCR_W - 70, 46); gfx->print(fb); }
   gfx->setTextSize(1); gfx->setTextColor(C_GREY);
   gfx->setCursor(10, 282); gfx->printf("bloc %ld", blockHeight);
   char pool[32]; long btx; snapLastBlock(pool, sizeof(pool), &btx);
@@ -2518,127 +2680,122 @@ void drawPageAI() {
   gfx->setTextColor(C_DGREY);
   gfx->setCursor(96, 36); gfx->print("calcul on-device, rien ne sort");
 
-  // ---------- panneau 1 : prochain bloc (Poisson) ----------
+  // ---------- panneau 1 : prochain bloc (Poisson, SANS MÉMOIRE) ----------
+  // FIX : l'ancien "compte à rebours" (λ - écoulé) était faux : l'attente
+  // restante ne diminue pas avec le temps écoulé. On affiche le temps écoulé,
+  // sa RARETÉ, la médiane (constante) et 6 confirmations (loi d'Erlang).
   gfx->fillRoundRect(10, 48, 224, 140, 8, C_PANEL);
   gfx->setTextColor(C_GREY); gfx->setCursor(20, 56); gfx->print("PROCHAIN BLOC");
-  long ts[6]; int n;
-  portENTER_CRITICAL(&dataMux);
-  memcpy(ts, blkTs, sizeof(ts)); n = blkTsN;
-  portEXIT_CRITICAL(&dataMux);
-  time_t nowT = time(nullptr);
-  if (n >= 2 && nowT > 1000000000) {
-    // λ : rythme mesuré sur l'époque de difficulté si dispo (x5 plus stable),
-    // sinon moyenne des 6 derniers blocs
-    long lambda = lambdaEpoch > 0 ? lambdaEpoch : constrain((ts[0] - ts[n - 1]) / (n - 1), 60L, 3600L);
-    long el = max(0L, (long)nowT - ts[0]);
-    long rem = lambda - el;
-    char est[16];
-    long ar = rem >= 0 ? rem : -rem;
-    snprintf(est, sizeof(est), "%ld:%02ld", ar / 60, ar % 60);
-    int ew = drawSmooth(20, 66, est, rem >= 0 ? C_GREEN : C_ORANGE, C_PANEL);
+  long el = secsSinceBlock();
+  if (el >= 0) {
+    float lam = blockLambda(), rar = blockRarity(el);
+    uint16_t ec = rar < 0.8f ? C_GREEN : (rar < 0.95f ? C_ORANGE : C_RED);
+    char est[16]; snprintf(est, sizeof(est), "%ld:%02ld", el / 60, el % 60);
+    int ew = drawSmooth(20, 62, est, ec, C_PANEL);
     gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-    gfx->setCursor(24 + ew, 92); gfx->print(rem >= 0 ? "min est." : "min retard");
-    fxBar(20, 116, 196, 8, (float)el / lambda, rem >= 0 ? C_ORANGE : C_RED, C_BG);
-    gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-    gfx->setCursor(20, 132);
-    if (lambdaEpoch > 0) gfx->printf("rythme epoque ~%ld:%02ld /bloc", lambda / 60, lambda % 60);
-    else gfx->printf("rythme reel ~%ld min (%d blocs)", lambda / 60, n);
-    // probabilités Poisson : P(au moins 1 bloc) dans 1 / 5 / 10 min
+    gfx->setCursor(24 + ew, 80); gfx->print("ecoule");
+    fxBar(20, 108, 196, 8, rar, ec, C_BG);
+    gfx->setTextColor(C_GREY); gfx->setCursor(20, 121);
+    gfx->printf("plus long que %d%% des blocs", (int)(rar * 100));
+    long med = lroundf(lam * 0.693f), c6 = lroundf(lam * 5.67f / 60.0f);
+    gfx->setTextColor(C_DGREY); gfx->setCursor(20, 135);
+    gfx->printf("mediane %ld:%02ld - 6 conf. ~%ld min", med / 60, med % 60, c6);
+    // P(au moins 1 bloc) dans 1 / 5 / 10 min : IDENTIQUE quel que soit l'écoulé
+    gfx->setTextColor(C_GREY);
     gfx->setCursor(20, 150); gfx->print("P(bloc) :  1m    5m    10m");
     const int pm[3] = {60, 300, 600};
     for (int i = 0; i < 3; i++) {
-      float pr = 1.0f - expf(-(float)pm[i] / lambda);
+      float pr = 1.0f - expf(-(float)pm[i] / lam);
       int bw = (int)(44 * pr * fxEnter(800, i * 150));
       gfx->fillRoundRect(58 + i * 48, 162, 44, 10, 4, C_BG);
       if (bw > 5) gfx->fillRoundRect(58 + i * 48, 162, bw, 10, 4, pr > 0.63f ? C_GREEN : C_ORANGE);
       gfx->setTextColor(C_DGREY);
       gfx->setCursor(60 + i * 48, 176); gfx->printf("%d%%", (int)(pr * 100));
-      gfx->setTextColor(C_GREY);
     }
   } else {
     gfx->setTextColor(C_GREY); gfx->setCursor(20, 100); gfx->print("chargement...");
   }
 
-  // ---------- panneau 2 : fees (régression + cycles appris) ----------
+  // ---------- panneau 2 : délai de confirmation selon la fee ----------
+  // Remplace la régression sur fastestFee (dents de scie à chaque bloc) :
+  // lecture de la FILE réelle via les blocs projetés du mempool.
   gfx->fillRoundRect(246, 48, 224, 140, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(256, 56); gfx->print("FEES : TENDANCE");
-  int h[32]; int m;
-  portENTER_CRITICAL(&dataMux);
-  for (int i = 0; i < feeHistN; i++) h[i] = feeHist[(feeHistIdx - feeHistN + i + 64) % 32];
-  m = feeHistN;
-  portEXIT_CRITICAL(&dataMux);
-  if (m >= 4) {
-    int nn = min(m, 16);
-    float xm = (nn - 1) / 2.0f, ym = 0;
-    for (int i = 0; i < nn; i++) ym += h[m - nn + i];
-    ym /= nn;
-    float num = 0, den = 0;
-    for (int i = 0; i < nn; i++) { num += (i - xm) * (h[m - nn + i] - ym); den += (i - xm) * (i - xm); }
-    float slopeH = den > 0 ? num / den * 30.0f : 0;   // sat/vB par heure
-    bool up = slopeH > 1.0f, dn = slopeH < -1.0f;
-    drawArrow(262, 80, up ? true : false, up ? C_RED : (dn ? C_GREEN : C_GREY));
-    char sl[16]; snprintf(sl, sizeof(sl), "%s%.1f", slopeH >= 0 ? "+" : "", slopeH);
-    int sw2 = drawSmooth(282, 66, sl, up ? C_RED : (dn ? C_GREEN : C_WHITE), C_PANEL);
-    gfx->setTextSize(1); gfx->setTextColor(C_DGREY);
-    gfx->setCursor(286 + sw2, 92); gfx->print("sat/vB/h");
-    gfx->setTextColor(C_GREY);
-    gfx->setCursor(256, 118);
-    if (feeFast <= max(1, feeEco)) gfx->print("c'est calme : bon moment");
-    else if (dn) gfx->print("en baisse : attends un peu");
-    else if (up) gfx->print("en hausse : envoie vite");
-    else gfx->print("situation stable");
-    gfx->setTextColor(C_DGREY);
-    gfx->setCursor(256, 134); gfx->printf("regression sur %d echantillons", nn);
+  gfx->setTextColor(C_GREY); gfx->setCursor(256, 56); gfx->print("CONFIRMATION ESTIMEE");
+  int npb; portENTER_CRITICAL(&dataMux); npb = pbN; portEXIT_CRITICAL(&dataMux);
+  if (npb > 0 && feeFast > 0) {
+    float lv[4] = {feeFast, feeHalf, feeHour, max(feeEco, feeMin)};
+    float prev = -1; int row = 0;
+    for (int i = 0; i < 4 && row < 4; i++) {
+      if (lv[i] <= 0 || fabsf(lv[i] - prev) < 0.05f) continue;            // niveaux distincts
+      prev = lv[i];
+      char fb[10], eb[16]; fmtFee(fb, sizeof(fb), lv[i]);
+      float nb = feeBlocksFor(lv[i]);
+      fmtEta(eb, sizeof(eb), nb);
+      int y = 72 + row * 16;
+      gfx->fillRoundRect(256, y - 1, 4, 10, 1, feeColor(lv[i]));
+      gfx->setTextColor(C_WHITE); gfx->setCursor(266, y); gfx->printf("%5s sat/vB", fb);
+      gfx->setTextColor(nb >= 0 && nb <= 1.5f ? C_GREEN : C_GREY);
+      gfx->setCursor(362, y); gfx->print(eb);
+      row++;
+    }
+    gfx->setTextColor(C_DGREY); gfx->setCursor(256, 72 + row * 16 + 1);
+    gfx->print("(file actuelle, delai median)");
   } else {
-    gfx->setTextColor(C_GREY); gfx->setCursor(256, 100); gfx->print("collecte...");
+    gfx->setTextColor(C_GREY); gfx->setCursor(256, 100); gfx->print("lecture du mempool...");
   }
-  // cycles appris : créneau actuel vs norme + prochain creux
+  // créneau actuel vs norme apprise + prochain creux (créneaux fiables seulement)
   struct tm t = gTm;
   if (gTmOk) {
     int b0 = constrain(t.tm_wday * 24 + t.tm_hour, 0, 167);
-    float norm;
+    float norm, cur; uint8_t wk;
     portENTER_CRITICAL(&dataMux);
-    norm = feeBkt[b0];
+    norm = feeBkt[b0]; wk = feeWk[b0]; cur = pbN > 0 ? pbMed[0] : feeFast;
     portEXIT_CRITICAL(&dataMux);
-    gfx->setTextColor(C_GREY);
-    if (norm > 0 && feeFast > 0) {
-      int ratio = (int)(feeFast * 100 / norm) - 100;
+    if (norm > 0 && cur > 0 && wk >= 2) {
+      int ratio = (int)(cur * 100 / norm) - 100;
       gfx->setCursor(256, 150);
       gfx->setTextColor(abs(ratio) < 20 ? C_GREY : (ratio > 0 ? C_RED : C_GREEN));
       gfx->printf("creneau : %s%d%% vs norme", ratio >= 0 ? "+" : "", ratio);
-      // prochain creux : 1er créneau à < 75% de la norme actuelle (scan 48 h)
+      // prochain creux : moyenne glissante sur 3 h < 75 % de la norme actuelle
       int found = -1;
       portENTER_CRITICAL(&dataMux);
-      for (int k = 1; k <= 48; k++) {
-        float v = feeBkt[(b0 + k) % 168];
-        if (v > 0 && v < norm * 0.75f) { found = k; break; }
+      for (int k = 1; k <= 48 && found < 0; k++) {
+        float sum = 0; int cnt = 0;
+        for (int d = -1; d <= 1; d++) { int bb = (b0 + k + d + 168) % 168; if (feeBkt[bb] > 0 && feeWk[bb] >= 2) { sum += feeBkt[bb]; cnt++; } }
+        if (cnt >= 2 && sum / cnt < norm * 0.75f) found = k;
       }
       portEXIT_CRITICAL(&dataMux);
-      gfx->setTextColor(C_GREY);
-      gfx->setCursor(256, 164);
+      gfx->setTextColor(C_GREY); gfx->setCursor(256, 164);
       if (found > 0) gfx->printf("creux probable dans ~%dh", found);
-      else gfx->print("pas de creux sous 48 h");
+      else gfx->print("pas de creux net sous 48 h");
     } else {
-      gfx->setCursor(256, 150); gfx->print("cycles : apprentissage...");
+      gfx->setTextColor(C_GREY); gfx->setCursor(256, 150);
+      gfx->printf("cycles : %d/2 semaines", wk);
+      gfx->setCursor(256, 164); gfx->print("(1 mesure par heure)");
     }
-    gfx->setTextColor(C_DGREY);
-    gfx->setCursor(256, 178); gfx->printf("appris ici : %ld echantillons", feeSamples);
+    int learned = 0;
+    portENTER_CRITICAL(&dataMux);
+    for (int i = 0; i < 168; i++) if (feeWk[i] >= 2) learned++;
+    portEXIT_CRITICAL(&dataMux);
+    gfx->setTextColor(C_DGREY); gfx->setCursor(256, 178);
+    gfx->printf("creneaux fiables : %d/168", learned);
   }
 
   // ---------- panneau 3 : cycles de fees sur 24 h (aujourd'hui) ----------
   gfx->fillRoundRect(10, 196, 460, 94, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(20, 204); gfx->print("CYCLES DE FEES - 24 h apprises");
-  gfx->setTextColor(C_DGREY); gfx->setCursor(220, 204); gfx->print("(barre orange = maintenant)");
+  gfx->setTextColor(C_GREY); gfx->setCursor(20, 204); gfx->print("CYCLES DE FEES - aujourd'hui");
+  gfx->setTextColor(C_DGREY); gfx->setCursor(190, 204); gfx->print("(pale = moins de 2 semaines)");
   if (gTmOk && feeSamples > 40) {
-    float day[24]; float mx = 1;
+    float day[24]; uint8_t dw[24]; float mx = 0;
     portENTER_CRITICAL(&dataMux);
-    for (int i = 0; i < 24; i++) { day[i] = feeBkt[t.tm_wday * 24 + i]; if (day[i] > mx) mx = day[i]; }
+    for (int i = 0; i < 24; i++) { day[i] = feeBkt[t.tm_wday * 24 + i]; dw[i] = feeWk[t.tm_wday * 24 + i]; if (day[i] > mx) mx = day[i]; }
     portEXIT_CRITICAL(&dataMux);
-    if (mx > 1) {
+    if (mx > 0) {
       for (int i = 0; i < 24; i++) {
         int bh = day[i] > 0 ? (int)(40 * day[i] / mx * fxEnter(700, i * 25)) : 2;
         if (bh < 2) bh = 2;
-        uint16_t bc = i == t.tm_hour ? mix565(C_ORANGE, C_YELLOW, u8f(fxFull() ? fxPulse(1200) : 0)) : C_DGREY;
+        uint16_t bc = i == t.tm_hour ? mix565(C_ORANGE, C_YELLOW, u8f(fxFull() ? fxPulse(1200) : 0))
+                                     : (dw[i] >= 2 ? C_GREY : C_DGREY);
         gfx->fillRect(15 + i * 19, 272 - bh, 14, bh, bc);
       }
       gfx->drawFastHLine(15, 272, 24 * 19 - 5, C_GREY);
@@ -2659,6 +2816,10 @@ void drawPageAI() {
 // FIX : ce fichier existait mais n'était inclus NULLE PART -> page Signaux v2 morte
 #include "signals.h"
 
+static void chartVolSnap(bool *ok, float *volD) {
+  portENTER_CRITICAL(&dataMux); *ok = sig.ready; *volD = sig.volD; portEXIT_CRITICAL(&dataMux);
+}
+
 // =====================================================================
 //  PAGE 7 — SIGNAUX (indicateurs techniques, pas des promesses)
 //  • Divergence tendance 1D vs 1S (cache 7J), force faible/moyenne/forte
@@ -2668,62 +2829,29 @@ void drawPageSIG() {
   gfx->setTextSize(1); gfx->setTextColor(C_ORANGE);
   gfx->setCursor(12, 36); gfx->print("SIGNAUX");
   gfx->setTextColor(C_DGREY);
-  gfx->setCursor(86, 36); gfx->print("indicateurs, pas des promesses");
+  gfx->setCursor(66, 36); gfx->print("mesures sur l'historique, pas des promesses");
 
-  // snapshots caches klines
+  // alerte volatilité court terme : dernier pas (~2 h) du cache 7J > 3 sigma
+  // (V5.2 : 2 sigma se déclenchait ~5 % du temps, c'est-à-dire sans arrêt)
   float c7[MAX_PTS]; int n7;
   portENTER_CRITICAL(&dataMux);
   n7 = nPtsC[curCur][TF_7J];
   if (n7 > 0) memcpy(c7, closesC[curCur][TF_7J], n7 * sizeof(float));
   portEXIT_CRITICAL(&dataMux);
-
-  // ---------- calculs communs 7J (rendements ~2h) ----------
-  float sd = 0, t1 = 0, t7 = 0, div = 0, last2h = 0;
-  bool ok7 = n7 >= 40;
-  if (ok7) {
-    int nr = n7 - 1;
-    float m = 0;
-    for (int i = 1; i < n7; i++) m += c7[i] / c7[i - 1] - 1.0f;
+  float sd = 0, last2h = 0; bool volAlert = false;
+  if (n7 >= 40) {
+    float m = 0; int nr = n7 - 2;                           // écart-type SANS le dernier pas
+    for (int i = 1; i < n7 - 1; i++) m += c7[i] / c7[i - 1] - 1.0f;
     m /= nr;
-    for (int i = 1; i < n7; i++) { float d2 = c7[i] / c7[i - 1] - 1.0f - m; sd += d2 * d2; }
+    for (int i = 1; i < n7 - 1; i++) { float d2 = c7[i] / c7[i - 1] - 1.0f - m; sd += d2 * d2; }
     sd = sqrtf(sd / nr);
-    if (sd < 1e-6f) sd = 1e-6f;
-    int k1 = min(12, n7 - 1);
-    t1 = (c7[n7 - 1] / c7[n7 - 1 - k1] - 1.0f) / (sd * sqrtf((float)k1));
-    t7 = (c7[n7 - 1] / c7[0] - 1.0f) / (sd * sqrtf((float)nr));
-    div = t1 - t7;
     last2h = c7[n7 - 1] / c7[n7 - 2] - 1.0f;
+    volAlert = sd > 1e-6f && fabsf(last2h - m) > 3.0f * sd;
   }
-  bool volAlert = ok7 && fabsf(last2h) > 2.0f * sd;
 
-  // ---------- panneau 1 : divergence tendance 1D vs 1S ----------
-  gfx->fillRoundRect(10, 48, 296, 116, 8, C_PANEL);
-  gfx->setTextColor(C_GREY); gfx->setCursor(20, 56); gfx->print("TENDANCE 1D vs 1S");
-  if (ok7) {
-    int dir = div > 0.3f ? 1 : div < -0.3f ? -1 : 0;
-    int force = fabsf(div) > 1.6f ? 3 : fabsf(div) > 0.8f ? 2 : 1;
-    uint16_t dc = dir > 0 ? C_GREEN : dir < 0 ? C_RED : C_GREY;
-    drawArrow(28, 78, dir >= 0, dc);
-    gfx->setTextSize(2); gfx->setTextColor(dc);
-    gfx->setCursor(50, 72);
-    gfx->print(dir > 0 ? "HAUSSIER" : dir < 0 ? "BAISSIER" : "NEUTRE");
-    // force : 3 barres
-    for (int i = 0; i < 3; i++) {
-      int bh = (int)((8 + i * 8) * fxEnter(600, i * 120));
-      gfx->fillRoundRect(170 + i * 26, 86 - i * 8, 20, 8 + i * 8, 3, C_BG);
-      if (i < force && bh > 2) gfx->fillRoundRect(170 + i * 26, 94 - bh, 20, bh, 3, dc);
-    }
-    gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-    gfx->setCursor(20, 100);
-    gfx->print(force == 3 ? "signal FORT" : force == 2 ? "signal moyen" : "signal faible");
-    gfx->setCursor(20, 118); gfx->printf("div : %s%.2f ecarts", div >= 0 ? "+" : "", div);
-    gfx->setCursor(20, 134); gfx->printf("1D %s%.1f%%  1S %s%.1f%%",
-      t1 >= 0 ? "+" : "", t1 * sd * 3.46f * 100, t7 >= 0 ? "+" : "", t7 * sd * 9.1f * 100);
-    gfx->setTextColor(C_DGREY);
-    gfx->setCursor(20, 150); gfx->print("divergence normalisee (cache 7J)");
-  } else {
-    gfx->setTextColor(C_GREY); gfx->setCursor(20, 100); gfx->print("chargement 7J...");
-  }
+  // ---------- panneau 1 : amplitude prévue (remplace "HAUSSIER / BAISSIER",
+  //            un appel directionnel qui n'était calibré sur rien) ----------
+  drawPanelAmplitude(10, 48);
 
   // ---------- panneau 2 : compression calibrée (TTM squeeze, pctl 120 j) ----------
   drawPanelSqueezeCal(318, 48);
@@ -2734,22 +2862,29 @@ void drawPageSIG() {
   // ---------- panneau 4 : anomalies ----------
   gfx->fillRoundRect(10, 244, 460, 46, 8, C_PANEL);
   gfx->setTextColor(C_GREY); gfx->setCursor(20, 252); gfx->print("ANOMALIES");
+  AnomStat am, af;
+  portENTER_CRITICAL(&dataMux); am = anMem; af = anFee; portEXIT_CRITICAL(&dataMux);
   bool anyA = false;
   int ay = 268;
-  if (fabsf(anomMemZ) > 2.5f) {
+  if (am.n < 30) {
+    gfx->setTextColor(C_DGREY); gfx->setCursor(110, 260);
+    gfx->printf("calibrage des reperes (%d/30 mesures)", am.n);
+    anyA = true;
+  }
+  if (am.hot >= 2) {
     anyA = true;
     gfx->setTextColor(C_ORANGE); gfx->setCursor(110, ay - 16);
-    gfx->printf("MEMPOOL x%.1f (z=%.1f)", mempoolCount / max(1.0f, anomMemAvg), anomMemZ);
+    gfx->printf("MEMPOOL x%.1f vs normale (z=%.1f)", expf(am.z * sqrtf(am.var) ), am.z);
   }
-  if (fabsf(anomFeeZ) > 2.5f) {
+  if (af.hot >= 2) {
     anyA = true;
     gfx->setTextColor(C_ORANGE); gfx->setCursor(110, ay);
-    gfx->printf("FEES anormaux (z=%.1f)", anomFeeZ);
+    gfx->printf("FEES x%.1f vs normale (z=%.1f)", expf(af.z * sqrtf(af.var)), af.z);
   }
   if (volAlert) {
     anyA = true;
-    gfx->setTextColor(C_YELLOW); gfx->setCursor(280, ay - 16);
-    gfx->printf("VOL %s%.1f%% > 2s", last2h >= 0 ? "+" : "", last2h * 100);
+    gfx->setTextColor(C_YELLOW); gfx->setCursor(290, ay - 16);
+    gfx->printf("VOL %s%.1f%% > 3s", last2h >= 0 ? "+" : "", last2h * 100);
   }
   if (!anyA) {
     gfx->setTextColor(C_GREEN); gfx->setCursor(110, 260);
@@ -3045,6 +3180,7 @@ void setup() {
   analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);
 
   loadConfig();
+  vpLoad();                          // suivi des fourchettes de volatilité (NVS "vp")
   bootSplash("configuration chargee", 0.2f);
   // FIX : aucun WiFi enregistré -> portail tout de suite (avant : 20 s d'attente)
   if (cfg_ssid.length() == 0) startConfigPortal();
@@ -3241,7 +3377,7 @@ void loop() {
       else if (page == PG_PRICE && downX >= GX && downX <= GX + GW && downY >= GY - 8 && downY <= GY + GH) {
         // curseur graphe
         if (nPts > 1) {
-          int idx = (int)((long)(downX - GX - 4) * (nPts - 1) / (GW - 10));
+          int idx = (int)((long)(downX - GX - 4) * (nPts - 1) / max(1, chartHistW));
           cursorIdx = constrain(idx, 0, nPts - 1);
           beep(1800, 40, 20); lastActionMs = now;
           needRedraw = true;

@@ -24,6 +24,16 @@ Sorties mesurees :
   vs BASELINE inconditionnelle (honnetete : on affiche l'edge, pas un chiffre
   sorti du contexte).
 
+V2 (honnetete statistique) :
+  - n EFFECTIF : les fenetres de H jours qui se chevauchent ne sont pas des
+    cas independants -> on ne garde qu'un evenement tous les H jours
+  - IC 95 % de Wilson sur p_dir (calcule avec n effectif) : le firmware
+    affiche "pas d'avantage mesurable" quand l'IC contient 50 %
+  - AMPLITUDE : volatilite EWMA(0.94) + quantiles EMPIRIQUES des rendements
+    normalises (queues epaisses, asymetrie) pour H = 2 / 7 / 30 jours,
+    avec controle de couverture HORS-ECHANTILLON (walk-forward 60/40)
+  - seules les bougies CLOSES sont utilisees (la bougie du jour est retiree)
+
 Usage :  python3 calibrate_squeeze.py          # ecrit ../bitcoin-block-clock/signals_calib.h
 """
 import json, time, urllib.request, sys, os
@@ -47,6 +57,7 @@ def fetch_all_daily():
         start = d[-1][0] + 86400000
         time.sleep(0.15)
     # kline: [openTime, open, high, low, close, volume, ...]
+    out = out[:-1]                      # la derniere bougie (jour en cours) n'est pas close
     ts = np.array([k[0] // 1000 for k in out], dtype=np.int64)
     o = np.array([float(k[1]) for k in out])
     h = np.array([float(k[2]) for k in out])
@@ -138,14 +149,32 @@ def weekly_resample(ts, o, h, l, c):
     return W[:, 1], W[:, 2], W[:, 3], day2week   # h,l,c hebdo
 
 # ------------------------------------------------------------- calibration
-def pstats(rets, moms):
+def wilson(p, n, z=1.96):
+    if n == 0:
+        return 0.0, 1.0
+    d = 1 + z * z / n
+    c0 = p + z * z / (2 * n)
+    r = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (c0 - r) / d, (c0 + r) / d
+
+def n_indep(idx, H):
+    """nb d'evenements independants : 1 evenement tous les H jours au plus."""
+    k, last = 0, -10 ** 9
+    for i in idx:
+        if i - last >= H:
+            k += 1; last = i
+    return k
+
+def pstats(rets, moms, idx=None, H=1):
     """stats direction/expansion sur un sous-ensemble d'evenements."""
     n = len(rets)
     if n == 0:
         return None
     agree = np.sign(rets) == np.sign(moms)
+    ne = n_indep(idx, H) if idx is not None else n
+    lo, hi = wilson(float(agree.mean()), ne)
     return dict(
-        n=n,
+        n=n, n_eff=ne, ci_lo=lo, ci_hi=hi,
         p_dir=float(agree.mean()),
         p5=float((np.abs(rets) > 0.05).mean()),
         p10=float((np.abs(rets) > 0.10).mean()),
@@ -172,14 +201,15 @@ def main():
         fwd = np.full(len(c), np.nan)
         fwd[:-H] = c[H:] / c[:-H] - 1.0
         ok = valid & ~np.isnan(fwd) & (np.abs(mom) > 1e-9)
-        base = pstats(fwd[ok], mom[ok])
+        P = lambda m_: pstats(fwd[m_], mom[m_], np.where(m_)[0], H)
+        base = P(ok)
 
         # --- buckets percentile BBW (compression graduee)
         PB = [(0, 5), (5, 10), (10, 20), (20, 101)]
         pcts = []
         for lo_, hi_ in PB:
             m_ = ok & (pct >= lo_) & (pct < hi_)
-            pcts.append(pstats(fwd[m_], mom[m_]))
+            pcts.append(P(m_))
 
         # --- terciles de force momentum (parmi jours valides)
         am = np.abs(mom[ok])
@@ -187,28 +217,49 @@ def main():
         moms_ = []
         for lo_, hi_ in [(0, t1), (t1, t2), (t2, 1e9)]:
             m_ = ok & (np.abs(mom) >= lo_) & (np.abs(mom) < hi_)
-            moms_.append(pstats(fwd[m_], mom[m_]))
+            moms_.append(P(m_))
 
         # --- momentum aligne avec le regime 90j (confluence, vue large)
         conf = ok & (np.sign(mom) == np.sign(roc90)) & (np.abs(mom) >= t2)
-        confl = pstats(fwd[conf], mom[conf])
+        confl = P(conf)
 
         # --- squeeze stack : daily ET weekly en compression
         stack = ok & sq_d & sq_w
-        stck = pstats(fwd[stack], mom[stack])
+        stck = P(stack)
         sqonly = ok & sq_d & ~sq_w
-        sqd = pstats(fwd[sqonly], mom[sqonly])
+        sqd = P(sqonly)
 
         # --- liberation de squeeze (dur>=5 hier, off aujourd'hui)
         rel = ok.copy(); rel[:] = False
         for i in range(1, len(c)):
             if dur[i - 1] >= 5 and not sq_d[i]:
                 rel[i] = ok[i]
-        rls = pstats(fwd[rel], mom[rel])
+        rls = P(rel)
 
         results[H] = dict(base=base, pcts=pcts, moms=moms_, confl=confl,
                           stack=stck, sq_daily=sqd, release=rls,
                           mom_t1=float(t1), mom_t2=float(t2))
+
+    # ------------------------------------------- amplitude (volatilite EWMA)
+    VOL_L = 0.94
+    lr = np.diff(np.log(c))                 # lr[t-1] = rendement du jour t
+    var = np.full(len(c), np.nan)
+    var[30] = np.mean(lr[:30] ** 2)
+    for t in range(31, len(c)):
+        var[t] = VOL_L * var[t - 1] + (1 - VOL_L) * lr[t - 1] ** 2
+    VOL_H = [2, 7, 30]
+    volq, volcov = {}, {}
+    for H in VOL_H:
+        tt = np.arange(60, len(c) - H)
+        z = np.log(c[tt + H] / c[tt]) / (np.sqrt(var[tt]) * np.sqrt(H))
+        volq[H] = np.percentile(z, [10, 25, 50, 75, 90])
+        sp = int(len(z) * 0.6)                                   # walk-forward 60/40
+        q_tr = np.percentile(z[:sp], [10, 25, 75, 90])
+        zt = z[sp:]
+        volcov[H] = (((zt >= q_tr[0]) & (zt <= q_tr[3])).mean(), ((zt >= q_tr[1]) & (zt <= q_tr[2])).mean())
+    print("\n=== AMPLITUDE (EWMA 0.94) : quantiles z  |  couverture hors-echantillon 80% / 50% ===")
+    for H in VOL_H:
+        print(f"  {H:2d}j  q10..q90 = {np.round(volq[H], 3)}   couverture {volcov[H][0]*100:.0f}% / {volcov[H][1]*100:.0f}%")
 
     # ------------------------------------------------------------ affichage
     for H, r in results.items():
@@ -227,13 +278,15 @@ def main():
                       ("sq_daily", "squeeze D seul"),
                       ("release", "liberation (dur>=5)")]:
             s = r[k]
-            if s: print(f"  {la:26s} dir {s['p_dir']*100:.0f}%  P|>10| {s['p10']*100:.0f}%  n={s['n']}")
+            if s: print(f"  {la:26s} dir {s['p_dir']*100:.0f}%  IC95 [{s['ci_lo']*100:.0f}-{s['ci_hi']*100:.0f}]"
+                        f"  P|>10| {s['p10']*100:.0f}%  n={s['n']} (indep {s['n_eff']})")
 
     # ------------------------------------------------------- header C genere
     def row(s, b):
         if s is None: s = b
         return (f"{{{s['p_dir']*100:.0f},{s['p5']*100:.0f},{s['p10']*100:.0f},"
-                f"{s['p20']*100:.0f},{s['med']*1000:.0f},{s['n']}}}")
+                f"{s['p20']*100:.0f},{s['med']*1000:.0f},{s['n']},{s['n_eff']},"
+                f"{s['ci_lo']*100:.0f},{s['ci_hi']*100:.0f}}}")
 
     hpath = os.path.join(os.path.dirname(__file__) or ".",
                          "..", "bitcoin-block-clock", "signals_calib.h")
@@ -243,10 +296,11 @@ def main():
         f.write(f"// Donnees: BTCUSDT 1d, {time.strftime('%Y-%m-%d', time.gmtime(ts[0]))}"
                 f" -> {time.strftime('%Y-%m-%d', time.gmtime(ts[-1]))} ({len(c)} jours)\n")
         f.write("// Frequences historiques MESUREES, pas des promesses.\n")
-        f.write("// Champs: {p_dir%, p_abs5%, p_abs10%, p_abs20%, med_abs_ret x1000, n}\n")
+        f.write("// Champs: {p_dir%, p_abs5%, p_abs10%, p_abs20%, med_abs_ret x1000, n,\n"
+                "//          n_eff (evenements independants), IC95 Wilson bas%, haut%}\n")
         f.write("// ============================================================\n")
         f.write("#pragma once\n#include <stdint.h>\n\n")
-        f.write("struct CalRow { uint8_t pDir, p5, p10, p20; uint16_t med; uint16_t n; };\n\n")
+        f.write("struct CalRow { uint8_t pDir, p5, p10, p20; uint16_t med; uint16_t n; uint16_t nEff; uint8_t ciLo, ciHi; };\n\n")
         for H, tag in HORIZONS.items():
             r = results[H]; b = r["base"]
             f.write(f"// ---------- horizon {tag} ----------\n")
@@ -263,6 +317,16 @@ def main():
             f.write(f"static const CalRow CAL{H}_RELEASE   = {row(r['release'],b)};\n")
             f.write(f"static const float  CAL{H}_MOM_T1 = {r['mom_t1']:.4f}f, "
                     f"CAL{H}_MOM_T2 = {r['mom_t2']:.4f}f;\n\n")
+        f.write("// ---------- amplitude : volatilite EWMA + quantiles empiriques ----------\n")
+        f.write("// fourchette(H) = prix * exp(q * sigma_jour * sqrt(H))\n")
+        for H in VOL_H:
+            f.write(f"// H={H}j : couverture hors-echantillon 80% -> {volcov[H][0]*100:.0f}%, 50% -> {volcov[H][1]*100:.0f}%\n")
+        f.write(f"static const float VOL_LAMBDA = {VOL_L}f;\n")
+        f.write("static const uint8_t VOL_H[3] = {2, 7, 30};\n")
+        f.write("static const float VOL_Q[3][5] = {   // q10, q25, q50, q75, q90\n")
+        for H in VOL_H:
+            f.write("  {" + ", ".join(f"{v:.4f}f" for v in volq[H]) + "},\n")
+        f.write("};\n")
     print(f"\n-> {os.path.abspath(hpath)} ecrit.")
 
 if __name__ == "__main__":

@@ -26,7 +26,9 @@ cd firmware/tools/sim
 ./make_media.sh                   # PNG + demo.mp4 + new-block.gif dans out/
 ```
 Modes : `pages`, `tour`, `pagesanim`, `cube`, `doom` (partie scriptée), `doomzoo`
-(galerie des monstres), `boot`, `eco`, `off`.
+(galerie des monstres), `boot`, `eco`, `off`,
+`sigcheck` (parité du calcul embarqué des signaux : `build/sim out.txt sigcheck daily.txt`,
+fichier `h l c` par ligne, à comparer avec `calibrate_squeeze.compute_states`).
 Données d'exemple : `mockdata.inc` ; scénarios : `scenario.inc`.
 Variables : `SKETCH=` (dossier du sketch), `ARDUINO_LIBS=` (dossier des libs).
 

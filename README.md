@@ -46,6 +46,15 @@ simulator ([`firmware/tools/sim`](firmware/tools/sim)).*
   needle · node **radar ping** · **DOOM** brick walls, sky/fog gradients.
 - **Animated boot splash** while WiFi connects.
 - **BTC DOOM v3** — rebuilt from scratch as a real Doom-like (see below).
+- **V5.2 — honest predictions**: block timer is now memoryless (elapsed time,
+  rarity, median, 6-confirmation ETA — the old countdown was statistically
+  wrong); **confirmation ETA per fee level** from mempool.space projected
+  blocks; decimal fees; fee cycles that actually learn (hourly medians over
+  weeks); robust anomaly detection (no more alarm at boot); direction odds
+  shown with **independent samples + 95 % confidence** ("no measurable edge"
+  when it includes 50 %); **calibrated volatility cone** (50 % / 80 %) on the
+  7D/30D chart — out-of-sample coverage 79–82 % for 80 % — with an on-device
+  track record.
 
 ![BTC DOOM v3](images/btc-doom-v3.gif)
 - **Animation level** on the web page (`http://blockclock.local`):

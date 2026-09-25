@@ -43,6 +43,13 @@ void run_scenario(int argc, char **argv) {
   seedData(); seedStrip(); dispPrice = 0;
   refreshClock();
   if (!strcmp(mode, "pages")) {
+    { char c2[300]; snprintf(c2, sizeof(c2), "mkdir -p %s", out); system(c2); }
+    // vue 30J pour montrer le cône de volatilité
+    page = PG_PRICE; curTf = TF_30J; chartCacheLoad(); pageEnterMs = millis(); chartAnimMs = 0; runFrames(45);
+    snprintf(p, sizeof(p), "%s/page0_30j.ppm", out); harness_save(p);
+    curTf = TF_7J; chartCacheLoad(); runFrames(45);
+    snprintf(p, sizeof(p), "%s/page0_7j.ppm", out); harness_save(p);
+    curTf = TF_24H; chartCacheLoad();
     { char c[300]; snprintf(c, sizeof(c), "mkdir -p %s", out); system(c); }
     for (int pg = 0; pg < PG_COUNT; pg++) {
       page = pg; doomReset = true; poolsReset = true; pageEnterMs = millis();
@@ -81,6 +88,21 @@ void run_scenario(int argc, char **argv) {
     tap(TAB_W / 2, 310); newBlock("ViaBTC", 5.0f, 2011); runMs(NB_DUR + 600);
     rec(nullptr);
     animLevel = 2;
+  } else if (!strcmp(mode, "sigcheck")) {           // parité ttmCore / EWMA vs calibration Python
+    static float H[5000], Lw[5000], C[5000]; int N = 0;
+    FILE *f = fopen(argc > 3 ? argv[3] : "daily.txt", "r");
+    while (f && N < 5000 && fscanf(f, "%f %f %f", &H[N], &Lw[N], &C[N]) == 3) N++;
+    if (f) fclose(f);
+    FILE *o = fopen(out, "w");
+    for (int i = 60; i < N; i++) { bool q; float bw, mm; ttmCore(H, Lw, C, N, i, &q, &bw, &mm); fprintf(o, "%d %d %.6f %.6f\n", i, q ? 1 : 0, bw, mm); }
+    fclose(o);
+    // EWMA firmware sur les 300 derniers jours (comme sur la carte)
+    int st = N - 300; double v = 0;
+    for (int t = 1; t <= 30; t++) { double r = log((double)C[st + t] / C[st + t - 1]); v += r * r; }
+    v /= 30;
+    for (int t = 31; t < 300; t++) { double r = log((double)C[st + t] / C[st + t - 1]); v = 0.94 * v + 0.06 * r * r; }
+    fprintf(stderr, "volD_fw=%.6f\n", sqrt(v));
+    return;
   } else if (!strcmp(mode, "doomzoo")) {             // galerie : monstres / objets en pleine lumière
     page = PG_DOOM; runFrames(2);
     dLoadLevel(0); dNT = 0;
