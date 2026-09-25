@@ -23,6 +23,13 @@ Projet complet, signé **silexperience** :
 
 ![Cinématique nouveau bloc](images/new-block-cinematic.gif)
 
+**Nouveau boîtier V3 « Flush »** ([case_v3/](case_v3/README.md)) : seul l'écran
+est visible, à fleur de la façade. Il intègre une batterie 10 000 mAh, un haut-parleur Ø40,
+une carte annexe et le passage USB-C, avec une bande cannelée et une gravure en
+blocs au dos. Il s'imprime sans supports.
+
+![Boîtier V3](case_v3/images/v3_avant.png)
+
 Compilation / flash du firmware : voir [README.md](README.md) (anglais).
 Manuel d'utilisation : [MANUAL.md](MANUAL.md) (anglais).
 

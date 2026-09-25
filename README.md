@@ -142,12 +142,27 @@ kept in `images/screens/`.*
 
 ## 🧊 Enclosure — parametric & 3D-printed
 
-| | **v1 — Compact** | **v2 — Deep (~15 cm)** |
-|---|---|---|
-| Look | Rounded oblong pebble | Mini retro TV / Echo Show wedge |
-| Depth | 20 mm | ~147 mm |
-| Fits | Board only | Board + speaker + 2000 mAh battery |
-| Files | `case/boitier_bitcoinclock.stl` | `case/boitier_deep_avant.stl` + `case/boitier_deep_arriere.stl` |
+### NEW — v3 « Flush » (`case_v3/`)
+
+![case v3](case_v3/images/v3_avant.png)
+
+Fully redesigned: **only the screen shows, flush with the front**. The
+module slides in from the front and is screwed from behind. The case holds
+**every component**: 10,000 mAh LiPo standing against the back wall, Ø40 mm
+speaker behind a hexagonal grille, a bay for an extra board (Arduino,
+charger…) and a USB-C passage on the left flank. The **fluted band** and the
+**engraved block pattern** on the back print cleanly: **no supports**, two
+parts, snap hooks + 2 hidden screws. It is parametric (`build_case_v3.py`),
+with an interference check (`check_fit.py`) and a 40-minute **fit gauge**
+to print first.
+→ **[case_v3/README.md](case_v3/README.md)**
+
+| | **v1 — Compact** | **v2 — Deep (~15 cm)** | **v3 — Flush** |
+|---|---|---|---|
+| Look | Rounded oblong pebble | Mini retro TV / Echo Show wedge | Squircle face, fluted wedge |
+| Depth | 20 mm | ~147 mm | ~88 mm |
+| Fits | Board only | Board + speaker + 2000 mAh battery | Board + Ø40 speaker + **10,000 mAh** + extra board |
+| Files | `case/boitier_bitcoinclock.stl` | `case/boitier_deep_avant.stl` + `case/boitier_deep_arriere.stl` | `case_v3/bbc_v3_face.stl` + `case_v3/bbc_v3_corps.stl` |
 
 **Shared**: 12° desk tilt (stability-checked) · mounted with the **4 original
 board screws** (84.5 × 52.0 mm pattern) · USB-C cutout · verified
