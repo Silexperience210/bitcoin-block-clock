@@ -483,6 +483,27 @@ void synthBell(float freq, float durSec, float vol) {
   }
 }
 
+// bruit blanc filtré à décroissance rapide : tirs / explosions (BTC DOOM)
+void synthNoise(float durSec, float vol) {
+  const int chunk = 256;
+  int16_t buf[chunk * 2];
+  long total = (long)(SAMPLE_RATE * durSec), pos = 0;
+  uint32_t r = 0x2545F491; float lp = 0;
+  while (pos < total) {
+    int i = 0;
+    for (; i < chunk && pos < total; i++, pos++) {
+      r = r * 1664525u + 1013904223u;
+      float w = ((int32_t)(r >> 16) - 32768) / 32768.0f;
+      lp += 0.45f * (w - lp);
+      float t = (float)pos / SAMPLE_RATE;
+      int16_t v = (int16_t)(lp * expf(-t * 5.5f / durSec) * vol * 30000);
+      buf[i * 2] = v; buf[i * 2 + 1] = v;
+    }
+    size_t w;
+    i2s_write(I2S_PORT, buf, i * 2 * sizeof(int16_t), &w, portMAX_DELAY);
+  }
+}
+
 // ---------- parole SAM (voix anglaise, réglage "doux") ----------
 #define SAM_SPEED  60    // 72 = défaut (plus petit = plus lent)
 #define SAM_PITCH  55    // 64 = défaut (plus petit = plus grave/doux)
@@ -640,7 +661,8 @@ void sndTask(void *param) {
     }
     if (xQueueReceive(sndQ, &n, pdMS_TO_TICKS(120)) == pdTRUE) {
       if (n.kind == SND_EVENT && (nightMode || sleeping)) continue;  // silencieux la nuit / en veille
-      synthBell((float)n.freq, n.durMs / 1000.0f, n.vol / 100.0f);
+      if (n.freq == 0) synthNoise(n.durMs / 1000.0f, n.vol / 100.0f);   // effets DOOM
+      else synthBell((float)n.freq, n.durMs / 1000.0f, n.vol / 100.0f);
     }
 #if DEBUG_WM
     static unsigned long tWm2 = 0;
@@ -2736,525 +2758,11 @@ void drawPageSIG() {
 }
 
 // =====================================================================
-//  PAGE 8 — BTC DOOM (mini raycaster façon Wolfenstein 3D)
-//  Drag = tourner/avancer · bouton FIRE = tirer · ✕ = quitter
-//  Démons billboard avec occlusion z-buffer, chassent le joueur.
+//  PAGE 8 — BTC DOOM v3 : moteur façon Doom (voir doom.h / doom_assets.h)
+//  Plein écran, textures / sols / plafonds, portes, clés, 3 niveaux,
+//  4 monstres originaux, pistolet + fusil à pompe, automap, melt.
 // =====================================================================
-#define GAME_EX (SCR_W - 40)          // bouton quitter
-#define GAME_EY 32
-#define GAME_EW 32
-#define GAME_EH 26
-#define FIRE_X  356                   // bouton FIRE
-#define FIRE_Y  216
-#define FIRE_W  112
-#define FIRE_H  76
-
-#define DM_W 16
-#define DM_H 16
-const uint8_t dmMap[DM_H][DM_W] = {
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-  {1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1},
-  {1,0,1,1,0,1,1,0,1,0,1,1,1,1,0,1},
-  {1,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1},
-  {1,0,1,0,1,0,1,1,1,0,1,0,1,1,0,1},
-  {1,0,0,0,1,0,0,0,0,0,0,0,1,0,0,1},
-  {1,1,1,0,1,1,1,0,1,1,1,0,1,0,1,1},
-  {1,0,0,0,0,0,1,0,0,0,1,0,0,0,0,1},
-  {1,0,1,1,1,0,1,1,1,0,1,1,1,1,0,1},
-  {1,0,0,0,1,0,0,0,1,0,0,0,0,1,0,1},
-  {1,0,1,0,1,1,1,0,1,0,1,1,0,1,0,1},
-  {1,0,1,0,0,0,0,0,0,0,1,0,0,1,0,1},
-  {1,0,1,1,1,1,1,0,1,0,1,0,1,1,0,1},
-  {1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1},
-  {1,0,1,0,1,1,0,0,0,0,1,1,1,0,0,1},
-  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
-};
-
-#define DOOM_RAYS 120
-#define DOOM_COLW (SCR_W / DOOM_RAYS)  // colonnes de 4 px
-#define DOOM_TOP  28                   // sous le header
-#define DOOM_BOT  (SCR_H - 28)         // au-dessus de la barre d'onglets
-#define DOOM_FOV  (PI / 3.0f)          // 60°
-#define DM_ENEMIES 6
-
-// ---- DOOM v2 : ennemis Bitcoin personnalisés ----
-enum { ET_SAYLOR = 0, ET_TRUMP, ET_LAGARDE };
-struct DmEnemy { float x, y; uint8_t st; unsigned long t0;
-                 uint8_t type; int hp; unsigned long hitMs, shootMs; };  // st: 0=mort 1=vif 2=agonise
-DmEnemy  dmE[DM_ENEMIES];
-float    dmX = 1.5f, dmY = 1.5f, dmA = 0.0f;
-float    zbuf[DOOM_RAYS];
-bool     doomReset = true;
-int      doomScore = 0;
-uint8_t  dmWave = 1;
-unsigned long doomShotMs = 0, doomHurtMs = 0, doomLastMs = 0;
-uint16_t dmShade[2][4];                // murs [côté][niveau]
-uint16_t dmShadeE[4];                  // démons [niveau]
-
-const int   DM_HP[3]    = {3, 1, 2};                        // Saylor tank, Trump fragile, Lagarde moyen
-const float DM_SPD[3]   = {0.30f, 0.75f, 0.40f};            // vitesse (cell/s)
-const int   DM_SCORE[3] = {300, 100, 200};                  // score au kill
-const char* DM_NAME[3]  = {"SAYLOR", "TRUMP", "LAGARDE"};
-const char* DM_TTS[3]   = {"Saylor", "Trump", "Lagarde"};
-#define C_CYAN 0x07FF
-#define DOOM_VOICE_TAUNTS 1                                  // taunt vocal au kill (TTS)
-char dmPopup[40] = ""; unsigned long dmPopupMs = 0;          // popup kill / vague
-
-// projectiles de Lagarde ("hausses des taux" = liasses de billets esquivables)
-struct DmShot { float x, y, vx, vy; bool on; unsigned long t0; };
-#define DM_NSHOTS 3
-DmShot dmShot[DM_NSHOTS];
-
-// explosion de billets verts à la mort d'un ennemi
-#define DM_NBILLS 14
-struct DmBill { float x, y, vx, vy; };
-DmBill dmBills[DM_NBILLS];
-unsigned long dmBillsT0 = 0;
-
-// affiches Bitcoin sur les murs (billboards z-bufferés)
-struct DmPoster { float x, y; const char *txt; };
-const DmPoster DM_POSTERS[] = {
-  {2.5f, 1.15f, "HODL"},
-  {4.5f, 1.15f, "STACK SATS"},
-  {6.5f, 1.15f, "BUY THE DIP"},
-  {10.5f, 1.15f, "FIX THE MONEY"},
-  {12.5f, 1.15f, "NOT YOUR KEYS"},
-  {14.5f, 1.15f, "SAYLOR WAS RIGHT"},
-};
-#define DM_NPOSTERS 6
-
-uint16_t shade565(uint16_t c, int pct) {
-  uint16_t r = ((c >> 11) & 0x1F) * pct / 100;
-  uint16_t g = ((c >> 5) & 0x3F) * pct / 100;
-  uint16_t b = (c & 0x1F) * pct / 100;
-  return (r << 11) | (g << 5) | b;
-}
-
-void doomInitShades() {
-  const int lvl[4] = {100, 76, 56, 38};
-  for (int i = 0; i < 4; i++) {
-    dmShade[0][i] = shade565(C_ORANGE, lvl[i]);
-    dmShade[1][i] = shade565(C_ORANGE, lvl[i] * 2 / 3);  // faces ombrées
-    dmShadeE[i]   = shade565(C_RED, lvl[i]);
-  }
-}
-
-void doomSpawn(int i) {
-  for (int t = 0; t < 60; t++) {
-    int x = random(1, DM_W - 1), y = random(1, DM_H - 1);
-    if (dmMap[y][x]) continue;
-    float ddx = x + 0.5f - dmX, ddy = y + 0.5f - dmY;
-    if (ddx * ddx + ddy * ddy > 16) {
-      dmE[i].x = x + 0.5f; dmE[i].y = y + 0.5f; dmE[i].st = 1;
-      dmE[i].hp = DM_HP[dmE[i].type];
-      dmE[i].shootMs = millis() + random(1000, 3000);
-      return;
-    }
-  }
-  dmE[i].st = 0;                       // pas de place : reste mort
-}
-
-float normAng(float a) { while (a > PI) a -= 2 * PI; while (a < -PI) a += 2 * PI; return a; }
-
-// affiches Bitcoin : billboards z-bufferés, le texte grandit en approchant
-void doomDrawPoster(int pi) {
-  const DmPoster &p = DM_POSTERS[pi];
-  float dx = p.x - dmX, dy = p.y - dmY;
-  float dist = hypotf(dx, dy);
-  float ang = normAng(atan2f(dy, dx) - dmA);
-  if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) return;
-  float perp = dist * cosf(ang);
-  if (perp < 0.7f) return;                          // trop près : l'affiche masquait tout l'écran
-  int rh = DOOM_BOT - DOOM_TOP;
-  int sh = min(64, (int)(rh * 0.42f / perp));
-  if (sh < 8) return;
-  int sw = sh * 2;
-  int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
-  int y0 = DOOM_TOP + rh / 2 - sh / 2 - sh / 6;     // accrochée à hauteur des yeux
-  for (int x = max(0, sx - sw / 2); x <= min(SCR_W - 1, sx + sw / 2); x++) {
-    if (perp >= zbuf[x / DOOM_COLW]) continue;
-    bool bd = (x <= sx - sw / 2 + 1 || x >= sx + sw / 2 - 1);
-    gfx->drawFastVLine(x, y0, sh, bd ? C_ORANGE : C_PANEL);
-  }
-  if (sh > 30 && perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)]) {
-    int ts = sh > 60 ? 2 : 1;
-    gfx->setTextSize(ts); gfx->setTextColor(C_ORANGE);
-    gfx->setCursor(sx - (int)strlen(p.txt) * 3 * ts, y0 + (sh - 8 * ts) / 2);
-    gfx->print(p.txt);
-  }
-}
-
-void drawPageDoom() {
-  unsigned long now = millis();
-  if (doomReset) {
-    doomReset = false; doomScore = 0; dmWave = 1; dmPopup[0] = 0;
-    dmX = 1.5f; dmY = 1.5f; dmA = 0.0f;
-    doomInitShades();
-    for (int i = 0; i < DM_NSHOTS; i++) dmShot[i].on = false;
-    for (int i = 0; i < DM_ENEMIES; i++) { dmE[i].type = i % 3; doomSpawn(i); }
-  }
-  float dt = doomLastMs ? min(0.1f, (now - doomLastMs) / 1000.0f) : 0.016f;
-  doomLastMs = now;
-  int rh = DOOM_BOT - DOOM_TOP;
-
-  // ---- contrôle : deux joysticks MULTI-TOUCH (doigts indépendants) ----
-  // doigt zone GAUCHE (x < 240) : déplacement — vertical = avant/arrière,
-  //                               horizontal = STRAFE gauche/droite
-  // doigt zone DROITE (x >= 240) : regard — horizontal = tourner
-  // (FIRE et ✕ conservés ; base flottante à la pose de chaque doigt)
-  static struct Finger { bool on; int bx, by, kx, ky; } fL = {false, 0, 0, 0, 0}, fR = {false, 0, 0, 0, 0};
-  static bool fireHeld = false;
-  uint16_t txs[2], tys[2]; uint8_t tev[2];
-  int nt = readTouchMulti(txs, tys, tev, 2);
-  bool seenL = false, seenR = false, fireTap = false;
-  for (int i = 0; i < nt; i++) {
-    if (tev[i] == 1) continue;                          // doigt relevé
-    int x = txs[i], y = tys[i];
-    bool onFire = (x >= FIRE_X && x <= FIRE_X + FIRE_W && y >= FIRE_Y && y <= FIRE_Y + FIRE_H);
-    if (onFire && !fR.on) { fireTap = true; continue; } // doigt posé sur FIRE : pas un joystick
-    if (x < SCR_W / 2) {
-      if (!fL.on) { fL.on = true; fL.bx = x; fL.by = y; }
-      fL.kx = x; fL.ky = y; seenL = true;
-    } else {
-      if (!fR.on) { fR.on = true; fR.bx = x; fR.by = y; }
-      fR.kx = x; fR.ky = y; seenR = true;
-    }
-  }
-  if (!seenL) fL.on = false;
-  if (!seenR) fR.on = false;
-  // déplacement : vitesse ∝ déport du joystick gauche (chaque frame)
-  if (fL.on) {
-    float fwd = (fL.by - fL.ky) * 1.5f / 48.0f * dt;        // max ~1.5 cell/s
-    float lat = (fL.kx - fL.bx) * 1.5f / 48.0f * dt;        // strafe (perpendiculaire)
-    if (fwd > 0.2f) fwd = 0.2f; if (fwd < -0.2f) fwd = -0.2f;
-    if (lat > 0.2f) lat = 0.2f; if (lat < -0.2f) lat = -0.2f;
-    float nx = dmX + cosf(dmA) * fwd - sinf(dmA) * lat;
-    float ny = dmY + sinf(dmA) * fwd + cosf(dmA) * lat;
-    // collision avec marge de 0,2 case : la caméra ne rentre plus "dans" les murs
-    // (avant : écran entièrement orange collé à un mur)
-    const float PR = 0.2f;
-    if (!dmMap[(int)dmY][(int)(nx + (nx > dmX ? PR : -PR))]) dmX = nx;
-    if (!dmMap[(int)(ny + (ny > dmY ? PR : -PR))][(int)dmX]) dmY = ny;
-  }
-  // regard : vitesse de rotation ∝ déport du joystick droit
-  if (fR.on) dmA += (fR.kx - fR.bx) * 2.5f / 48.0f * dt;    // max ~2.5 rad/s
-
-  if (fireTap && !fireHeld) {            // TIR (hitscan)
-    fireHeld = true; doomShotMs = now;
-    beep(160, 60, 45);
-    for (int i = 0; i < DM_ENEMIES; i++) {
-      if (dmE[i].st != 1) continue;
-      float dx = dmE[i].x - dmX, dy = dmE[i].y - dmY;
-      float dist = hypotf(dx, dy);
-      if (dist > 12) continue;
-      float ang = normAng(atan2f(dy, dx) - dmA);
-      float perp = dist * cosf(ang);
-      int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
-      int sh = (int)(rh * 0.75f / max(0.1f, perp));
-      if (abs(sx - SCR_W / 2) < sh / 3 && perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)]) {
-        dmE[i].hitMs = now;
-        if (--dmE[i].hp > 0) {                          // touché mais vivant
-          beep(400, 40, 30);
-        } else {                                        // KILL
-          dmE[i].st = 2; dmE[i].t0 = now; doomScore += DM_SCORE[dmE[i].type];
-          snprintf(dmPopup, sizeof(dmPopup), "%s DOWN +%d", DM_NAME[dmE[i].type], DM_SCORE[dmE[i].type]);
-          dmPopupMs = now;
-          // explosion de billets verts depuis la position écran de l'ennemi
-          {
-            int ybK = DOOM_TOP + (rh + (int)(rh / max(0.1f, perp))) / 2;
-            dmBillsT0 = now;
-            for (int b = 0; b < DM_NBILLS; b++) {
-              dmBills[b].x = (float)sx; dmBills[b].y = (float)(ybK - sh / 2);
-              dmBills[b].vx = random(-250, 251) / 100.0f;   // px/frame
-              dmBills[b].vy = random(-450, 51) / 100.0f;    // jaillit vers le haut
-            }
-          }
-          if (dmE[i].type == ET_SAYLOR) { beep(300, 60, 35); beep(450, 60, 35); beep(600, 80, 35); }
-          else if (dmE[i].type == ET_TRUMP) { beep(600, 40, 35); beep(350, 70, 35); }
-          else { beep(700, 50, 35); beep(900, 70, 35); }
-#if DOOM_VOICE_TAUNTS
-          speak(String(DM_TTS[dmE[i].type]) + " down.", SND_UI);
-#endif
-        }
-      }
-    }
-  }
-  if (!fireTap) fireHeld = false;
-
-  // ---- ennemis : poursuite + attaque + tirs + vagues ----
-  float waveBoost = 1.0f + 0.15f * (dmWave - 1); if (waveBoost > 1.6f) waveBoost = 1.6f;
-  bool anyAlive = false;
-  for (int i = 0; i < DM_ENEMIES; i++) {
-    if (dmE[i].st == 1) {
-      anyAlive = true;
-      float dx = dmX - dmE[i].x, dy = dmY - dmE[i].y;
-      float d = hypotf(dx, dy);
-      if (d > 0.5f) {
-        float sp = DM_SPD[dmE[i].type] * waveBoost * dt;
-        float nx = dmE[i].x + dx / d * sp, ny = dmE[i].y + dy / d * sp;
-        if (!dmMap[(int)dmE[i].y][(int)nx]) dmE[i].x = nx;
-        if (!dmMap[(int)ny][(int)dmE[i].x]) dmE[i].y = ny;
-      } else if (now - doomHurtMs > 1000) {   // touché !
-        doomHurtMs = now; doomScore = max(0, doomScore - 50);
-        beep(120, 180, 50);
-        doomSpawn(i);                          // l'ennemi se téléporte loin
-      }
-      // LAGARDE : tire des "hausses des taux" à distance (ligne de vue requise)
-      if (dmE[i].type == ET_LAGARDE && d > 1.2f && d < 7.0f && now - dmE[i].shootMs > 3500) {
-        bool los = true;
-        for (float k = 0.5f; k < d; k += 0.5f)
-          if (dmMap[(int)(dmE[i].y + dy / d * k)][(int)(dmE[i].x + dx / d * k)]) { los = false; break; }
-        if (los) {
-          dmE[i].shootMs = now;
-          for (int s = 0; s < DM_NSHOTS; s++) if (!dmShot[s].on) {
-            dmShot[s].on = true; dmShot[s].t0 = now;
-            dmShot[s].x = dmE[i].x; dmShot[s].y = dmE[i].y;
-            dmShot[s].vx = dx / d * 2.2f; dmShot[s].vy = dy / d * 2.2f;
-            break;
-          }
-          beep(900, 30, 25);
-        }
-      }
-    } else if (dmE[i].st == 2 && now - dmE[i].t0 > 350) {
-      dmE[i].st = 0; dmE[i].t0 = now;          // mort -> respawn plus tard
-    } else if (dmE[i].st == 0 && now - dmE[i].t0 > 6000) {
-      doomSpawn(i);
-    }
-  }
-  // vague suivante : les 6 tués -> vitesse +15 %
-  static bool wavePending = false;
-  if (!anyAlive && !wavePending) {
-    wavePending = true; dmWave++;
-    snprintf(dmPopup, sizeof(dmPopup), "WAVE %d !", dmWave); dmPopupMs = now;
-    for (int i = 0; i < DM_ENEMIES; i++) { dmE[i].st = 0; dmE[i].t0 = now; }
-  } else if (anyAlive) wavePending = false;
-
-  // ---- projectiles de Lagarde ("hausses des taux") ----
-  for (int s = 0; s < DM_NSHOTS; s++) {
-    if (!dmShot[s].on) continue;
-    dmShot[s].x += dmShot[s].vx * dt; dmShot[s].y += dmShot[s].vy * dt;
-    if (dmMap[(int)dmShot[s].y][(int)dmShot[s].x] || now - dmShot[s].t0 > 4000) { dmShot[s].on = false; continue; }
-    float ddx = dmShot[s].x - dmX, ddy = dmShot[s].y - dmY;
-    if (ddx * ddx + ddy * ddy < 0.12f) {       // le joueur est touché
-      dmShot[s].on = false;
-      if (now - doomHurtMs > 800) {
-        doomHurtMs = now; doomScore = max(0, doomScore - 25);
-        beep(100, 200, 50);
-      }
-    }
-  }
-
-  // ---- ciel (nuit -> lueur orange à l'horizon) + sol (brouillard au loin) ----
-  {
-    const int NBs = 8; int half = rh / 2;
-    for (int k = 0; k < NBs; k++) {
-      int y0 = DOOM_TOP + half * k / NBs, y1 = DOOM_TOP + half * (k + 1) / NBs;
-      gfx->fillRect(0, y0, SCR_W, y1 - y0, mix565(C_BG, C_ORANGE_D, (uint8_t)(k * k * 2)));
-      int f0 = DOOM_TOP + half + (rh - half) * k / NBs, f1 = DOOM_TOP + half + (rh - half) * (k + 1) / NBs;
-      gfx->fillRect(0, f0, SCR_W, f1 - f0, mix565(C_BG, C_PANEL, (uint8_t)(80 + k * 24)));
-    }
-  }
-
-  // ---- raycasting DDA (+ z-buffer pour les sprites) ----
-  for (int i = 0; i < DOOM_RAYS; i++) {
-    float ra = dmA - DOOM_FOV / 2 + DOOM_FOV * i / DOOM_RAYS;
-    float rdx = cosf(ra), rdy = sinf(ra);
-    int mx = (int)dmX, my = (int)dmY;
-    float ddx = fabsf(1.0f / (rdx == 0 ? 1e-6f : rdx));
-    float ddy = fabsf(1.0f / (rdy == 0 ? 1e-6f : rdy));
-    int stx, sty; float sdx, sdy;
-    if (rdx < 0) { stx = -1; sdx = (dmX - mx) * ddx; } else { stx = 1; sdx = (mx + 1 - dmX) * ddx; }
-    if (rdy < 0) { sty = -1; sdy = (dmY - my) * ddy; } else { sty = 1; sdy = (my + 1 - dmY) * ddy; }
-    int side = 0;
-    for (int it = 0; it < 32; it++) {
-      if (sdx < sdy) { sdx += ddx; mx += stx; side = 0; }
-      else           { sdy += ddy; my += sty; side = 1; }
-      if (mx < 0 || my < 0 || mx >= DM_W || my >= DM_H || dmMap[my][mx]) break;
-    }
-    float dist = (side == 0 ? sdx - ddx : sdy - ddy) * cosf(ra - dmA);  // anti-fisheye
-    if (dist < 0.05f) dist = 0.05f;
-    zbuf[i] = dist;
-    int h = (int)(rh / dist);
-    int lvl = dist > 5 ? 3 : dist > 3 ? 2 : dist > 1.5f ? 1 : 0;
-    int y0 = DOOM_TOP + (rh - h) / 2;
-    gfx->fillRect(i * DOOM_COLW, max(y0, DOOM_TOP), DOOM_COLW, min(h, rh), dmShade[side][lvl]);
-    // ---- texture briques (murs proches) : joints horizontaux + verticaux décalés ----
-    if (h > 36) {
-      uint16_t mortar = shade565(dmShade[side][lvl], 55);
-      const int ROWS = 6, x0c = i * DOOM_COLW;
-      for (int r = 1; r < ROWS; r++) {
-        int yy = y0 + h * r / ROWS;
-        if (yy > DOOM_TOP && yy < DOOM_BOT) gfx->drawFastHLine(x0c, yy, DOOM_COLW, mortar);
-      }
-      if (h > 64) {
-        float rawD = (side == 0 ? sdx - ddx : sdy - ddy);
-        float wx = side == 0 ? dmY + rawD * rdy : dmX + rawD * rdx;
-        wx -= floorf(wx);
-        for (int r = 0; r < ROWS; r++) {
-          float dj = (r % 2) ? fabsf(wx - 0.5f) : min(wx, 1.0f - wx);
-          if (dj < 0.03f) {
-            int ya = max(DOOM_TOP, y0 + h * r / ROWS), yb = min(DOOM_BOT, y0 + h * (r + 1) / ROWS);
-            if (yb > ya) gfx->drawFastVLine(x0c + 1, ya, yb - ya, mortar);
-          }
-        }
-      }
-    }
-  }
-
-  // ---- affiches Bitcoin sur les murs ----
-  for (int i = 0; i < DM_NPOSTERS; i++) doomDrawPoster(i);
-
-  // ---- démons (billboards, tri peintre : loin -> près) ----
-  int order[DM_ENEMIES];
-  float pd[DM_ENEMIES];
-  for (int i = 0; i < DM_ENEMIES; i++) {
-    order[i] = i;
-    float dx = dmE[i].x - dmX, dy = dmE[i].y - dmY;
-    pd[i] = dmE[i].st ? dx * dx + dy * dy : -1;
-  }
-  for (int i = 0; i < DM_ENEMIES - 1; i++)
-    for (int j = i + 1; j < DM_ENEMIES; j++)
-      if (pd[order[j]] > pd[order[i]]) { int t2 = order[i]; order[i] = order[j]; order[j] = t2; }
-  for (int oi = 0; oi < DM_ENEMIES; oi++) {
-    int i = order[oi];
-    if (!dmE[i].st) continue;
-    float dx = dmE[i].x - dmX, dy = dmE[i].y - dmY;
-    float dist = hypotf(dx, dy);
-    float ang = normAng(atan2f(dy, dx) - dmA);
-    if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) continue;
-    float perp = dist * cosf(ang);
-    if (perp < 0.15f) continue;
-    int sh = (int)(rh * 0.75f / perp);
-    if (dmE[i].st == 2) sh = sh * (int)max(0L, 350L - (long)(now - dmE[i].t0)) / 350;  // agonie : rétrécit
-    if (sh < 4) continue;
-    int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
-    int yb = DOOM_TOP + (rh + (int)(rh / perp)) / 2;      // pieds au sol
-    int cyE = yb - sh / 2;
-    int lvl = perp > 5 ? 3 : perp > 3 ? 2 : perp > 1.5f ? 1 : 0;
-    int rw = max(2, sh / 3);
-    // corps : couleur par type (Saylor sombre, Trump orange, Lagarde bleu),
-    // flash blanc quand touché
-    uint16_t bodyC = (now - dmE[i].hitMs < 120) ? C_WHITE
-                     : dmE[i].type == ET_TRUMP ? C_ORANGE
-                     : dmE[i].type == ET_LAGARDE ? C_BLUE : C_DGREY;
-    (void)lvl;
-    for (int x = max(0, sx - rw); x <= min(SCR_W - 1, sx + rw); x++) {
-      if (perp >= zbuf[x / DOOM_COLW]) continue;          // occlus par le mur
-      float u = (float)(x - sx) / rw;
-      int hh = (int)(sh / 2 * sqrtf(max(0.0f, 1.0f - u * u)));
-      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, bodyC);
-    }
-    if (perp < 4 && dmE[i].st == 1) {                     // visage quand proche
-      int es = max(2, sh / 20);
-      if (dmE[i].type == ET_SAYLOR) {
-        // yeux LASER cyan (l'avatar légendaire de Saylor) + mini-BTC
-        gfx->fillRect(sx - sh / 5, cyE - sh / 6, sh / 5, es, C_CYAN);
-        gfx->fillRect(sx + sh / 10, cyE - sh / 6, sh / 5, es, C_CYAN);
-        gfx->fillCircle(sx, cyE + sh / 5, es, C_ORANGE);
-      } else {
-        gfx->fillRect(sx - sh / 8, cyE - sh / 6, es, es, C_WHITE);
-        gfx->fillRect(sx + sh / 8 - es, cyE - sh / 6, es, es, C_WHITE);
-        if (dmE[i].type == ET_TRUMP) {
-          // houppe blonde + cravate rouge
-          gfx->fillRect(sx - sh / 6, cyE - sh / 2 + sh / 12, sh / 3, sh / 10, C_YELLOW);
-          gfx->fillTriangle(sx - es, cyE + sh / 4, sx + es, cyE + sh / 4, sx, cyE + sh / 2, C_RED);
-        } else if (dmE[i].type == ET_LAGARDE) {
-          // col blanc de la régulatrice
-          gfx->fillRect(sx - es, cyE + sh / 8, es * 2, es, C_WHITE);
-        }
-      }
-    }
-    // nom au-dessus de l'ennemi quand proche
-    if (perp < 3.5f && dmE[i].st == 1) {
-      gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-      gfx->setCursor(sx - (int)strlen(DM_NAME[dmE[i].type]) * 3, cyE - sh / 2 - 9);
-      gfx->print(DM_NAME[dmE[i].type]);
-    }
-  }
-
-  // ---- projectiles de Lagarde (billboards jaunes) ----
-  for (int s = 0; s < DM_NSHOTS; s++) {
-    if (!dmShot[s].on) continue;
-    float dx = dmShot[s].x - dmX, dy = dmShot[s].y - dmY;
-    float dist = hypotf(dx, dy);
-    float ang = normAng(atan2f(dy, dx) - dmA);
-    if (fabsf(ang) > DOOM_FOV / 2 + 0.25f) continue;
-    float perp = dist * cosf(ang);
-    if (perp < 0.15f) continue;
-    int sh = (int)(rh * 0.25f / perp);
-    if (sh < 4) sh = 4;
-    int sx = (int)((ang + DOOM_FOV / 2) / DOOM_FOV * SCR_W);
-    int yb = DOOM_TOP + (rh + (int)(rh / perp)) / 2;
-    int cyE = yb - sh;
-    int rw = max(2, sh / 3);
-    for (int x = max(0, sx - rw); x <= min(SCR_W - 1, sx + rw); x++) {
-      if (perp >= zbuf[x / DOOM_COLW]) continue;
-      float u = (float)(x - sx) / rw;
-      int hh = (int)(sh / 2 * sqrtf(max(0.0f, 1.0f - u * u)));
-      if (hh > 0) gfx->drawFastVLine(x, cyE - hh, hh * 2, C_GREEN_D);
-    }
-    // bandeau blanc de la liasse de billets (si le centre est visible)
-    if (perp < zbuf[constrain(sx / DOOM_COLW, 0, DOOM_RAYS - 1)])
-      gfx->drawFastHLine(sx - rw / 2, cyE, rw, C_WHITE);
-  }
-
-  // ---- explosion de billets verts à la mort d'un ennemi (0,8 s) ----
-  if (dmBillsT0 && now - dmBillsT0 < 800) {
-    for (int b = 0; b < DM_NBILLS; b++) {
-      DmBill &bl = dmBills[b];
-      bl.x += bl.vx; bl.y += bl.vy; bl.vy += 0.30f;          // gravité écran
-      if (bl.y > DOOM_BOT + 8) continue;
-      gfx->fillRect((int)bl.x, (int)bl.y, 5, 3, (b % 3 == 0) ? C_GREEN_D : C_GREEN);
-      gfx->fillRect((int)bl.x + 2, (int)bl.y, 1, 3, C_WHITE);  // bandeau de la liasse
-    }
-  }
-
-  // ---- joysticks : repères fixes + base/knob de chaque doigt actif ----
-  gfx->drawCircle(70, 252, 34, C_DGREY);                     // repère joystick gauche
-  gfx->drawCircle(288, 252, 34, C_DGREY);                    // repère joystick regard
-  for (int f = 0; f < 2; f++) {
-    const Finger &fg = f ? fR : fL;
-    if (!fg.on) continue;
-    gfx->drawCircle(fg.bx, fg.by, 34, C_GREY);               // base flottante
-    int kx = fg.kx, ky = fg.ky;                              // knob clampé à 34 px
-    int ddx = fg.kx - fg.bx, ddy = fg.ky - fg.by;
-    float dd = hypotf((float)ddx, (float)ddy);
-    if (dd > 34) { kx = fg.bx + (int)(ddx * 34 / dd); ky = fg.by + (int)(ddy * 34 / dd); }
-    gfx->fillCircle(kx, ky, 13, C_ORANGE);
-  }
-
-  // ---- arme + muzzle flash + viseur ----
-  gfx->fillRect(SCR_W / 2 - 12, DOOM_BOT - 44, 24, 44, C_DGREY);
-  gfx->fillRect(SCR_W / 2 - 5, DOOM_BOT - 58, 10, 20, C_GREY);
-  if (now - doomShotMs < 90)
-    gfx->fillTriangle(SCR_W / 2 - 12, DOOM_BOT - 58, SCR_W / 2 + 12, DOOM_BOT - 58, SCR_W / 2, DOOM_BOT - 78, C_YELLOW);
-  gfx->drawFastHLine(SCR_W / 2 - 6, DOOM_TOP + rh / 2, 12, C_WHITE);
-  gfx->drawFastVLine(SCR_W / 2, DOOM_TOP + rh / 2 - 6, 12, C_WHITE);
-
-  // ---- HUD : minimap, score, FIRE, ✕, flash dégâts ----
-  for (int y = 0; y < DM_H; y++)
-    for (int x = 0; x < DM_W; x++)
-      if (dmMap[y][x]) gfx->fillRect(8 + x * 3, DOOM_TOP + 4 + y * 3, 3, 3, C_DGREY);
-  for (int i = 0; i < DM_ENEMIES; i++)
-    if (dmE[i].st == 1) gfx->fillRect(8 + (int)(dmE[i].x * 3) - 1, DOOM_TOP + 4 + (int)(dmE[i].y * 3) - 1, 3, 3, C_RED);
-  gfx->fillRect(8 + (int)(dmX * 3) - 1, DOOM_TOP + 4 + (int)(dmY * 3) - 1, 4, 4, C_ORANGE);
-  gfx->setTextSize(1); gfx->setTextColor(C_GREY);
-  gfx->setCursor(64, DOOM_TOP + 6); gfx->print("SCORE");
-  char sc[8]; snprintf(sc, sizeof(sc), "%d", doomScore);
-  drawSmooth(64, DOOM_TOP + 14, sc, C_WHITE, C_BG);
-  gfx->fillCircle(FIRE_X + FIRE_W / 2, FIRE_Y + FIRE_H / 2, 30, fireTap ? C_RED : C_RED_D);
-  gfx->setTextSize(2); gfx->setTextColor(C_WHITE);
-  gfx->setCursor(FIRE_X + FIRE_W / 2 - 22, FIRE_Y + FIRE_H / 2 - 8); gfx->print("FIRE");
-  // popup kill / vague
-  if (dmPopup[0] && now - dmPopupMs < 1600) textCenter(dmPopup, 56, 2, C_ORANGE);
-  gfx->drawRect(GAME_EX, GAME_EY, GAME_EW, GAME_EH, C_GREY);
-  gfx->drawLine(GAME_EX + 8, GAME_EY + 6, GAME_EX + GAME_EW - 9, GAME_EY + GAME_EH - 7, C_RED);
-  gfx->drawLine(GAME_EX + GAME_EW - 9, GAME_EY + 6, GAME_EX + 8, GAME_EY + GAME_EH - 7, C_RED);
-  if (now - doomHurtMs < 500) {
-    gfx->drawRect(2, DOOM_TOP + 2, SCR_W - 4, rh - 4, C_RED);
-    textCenter("TOUCHE !", 100, 3, C_RED);
-  }
-}
+#include "doom.h"
 
 // =====================================================================
 //  CUBE ISOMÉTRIQUE (cinématique nouveau bloc, splash)
@@ -3403,6 +2911,7 @@ void drawBlockAnim() {
 
 // dessine la page courante dans le canvas (sans flush)
 void renderPage() {
+  if (page == PG_DOOM) { drawPageDoom(); return; }     // plein écran (barre de statut du jeu)
   gfx->fillScreen(C_BG);
   if (page != PG_CUBE && page != PG_DOOM) fxDrawDust();
   drawHeader();
@@ -3471,11 +2980,19 @@ void fxSlide(int dir) {
 // changement de page centralisé (tap onglet, swipe, sortie Doom)
 void gotoPage(int np, int dir) {
   if (np == page) return;
+  int from = page;
   page = np;
   if (page == PG_POOLS) poolsReset = true;
-  if (page == PG_DOOM) doomReset = true;
   if (page == PG_AI || page == PG_SIG) requestFetch(REQ_KL30);
-  fxSlide(dir);
+  uint16_t *fb = gfx->getFramebuffer();
+  if ((np == PG_DOOM || from == PG_DOOM) && fb && fxPrevFb && fxNextFb && fxAny()) {
+    // entrée / sortie de DOOM : écran qui "fond" comme dans le jeu original
+    memcpy(fxPrevFb, fb, FB_PIX * 2);
+    fxT = millis(); pageEnterMs = fxT;
+    renderPage();
+    memcpy(fxNextFb, fb, FB_PIX * 2);
+    fxMeltRun();
+  } else fxSlide(dir);
   pageEnterMs = millis();
   lastDrawMs = millis(); needRedraw = false;
 }
@@ -3591,7 +3108,7 @@ void setup() {
   configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
 
   // ---------- tâches FreeRTOS ----------
-  sndQ = xQueueCreate(8, sizeof(SndNote));
+  sndQ = xQueueCreate(12, sizeof(SndNote));
   sndTxtQ = xQueueCreate(4, sizeof(SndTxt));
   xTaskCreatePinnedToCore(sndTask, "snd", 20480, NULL, 2, NULL, 0);   // sons + TTS (TLS+MP3 = gros stack)
   xTaskCreatePinnedToCore(netTask, "net", 16384, NULL, 1, NULL, 0);   // tous les fetchs HTTP (TLS + JSON + signaux)
@@ -3675,8 +3192,15 @@ void loop() {
     } else if (!sleeping && dt <= 1200) {
       int dx = (int)lastX - (int)downX;
       int dy = (int)lastY - (int)downY;
+      if (page == PG_DOOM) {
+        // DOOM plein écran : seul le ✕ compte (les autres touches sont gérées
+        // par le jeu : sticks, FIRE, MAP, armes) — pas d'onglets ni de swipe
+        if (downX >= GAME_EX && downX <= GAME_EX + GAME_EW && downY >= GAME_EY && downY <= GAME_EY + GAME_EH) {
+          beep(900, 60, 30); gotoPage(PG_PRICE, -1); lastActionMs = millis();
+        }
+      }
       // icône HP (header) : tap = cycle volume 100 -> 60 -> 30 -> muet
-      if (!touchMoved && downY < 26 && downX >= 340 && downX <= 372) {
+      else if (!touchMoved && downY < 26 && downX >= 340 && downX <= 372) {
         sndVolPct = (sndVolPct > 60) ? 60 : (sndVolPct > 30) ? 30 : (sndVolPct > 0) ? 0 : 100;
         saveConfig();
         needRedraw = true; lastActionMs = now;
@@ -3689,13 +3213,6 @@ void loop() {
           beep(1000, 50, 25);
           gotoPage(tab, tab > page ? 1 : -1);
           lastActionMs = millis();
-        }
-      }
-      else if (page == PG_DOOM) {
-        // page jeu : seul le ✕ compte — les drags sont des contrôles,
-        // ils ne doivent ni changer de page ni déclencher le refresh
-        if (downX >= GAME_EX && downX <= GAME_EX + GAME_EW && downY >= GAME_EY && downY <= GAME_EY + GAME_EH) {
-          beep(900, 60, 30); gotoPage(PG_PRICE, -1); lastActionMs = millis();
         }
       }
       else if (abs(dx) > 50 && abs(dy) < 100) {

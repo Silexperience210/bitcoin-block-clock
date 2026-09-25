@@ -145,6 +145,13 @@ with **zero repair**.
   page animated, ~25 FPS), **ECO** (page transitions + new-block cinematic
   only, lowest power) or **OFF** (static). MAX automatically drops to ECO at
   night (23:00–07:00). On battery, ECO noticeably extends runtime.
+- **BTC DOOM v3 (last page):** full screen. **Left stick** = move / strafe,
+  **right stick** = turn, **FIRE** = shoot (hold for auto-fire), tap the
+  **weapon slots** (bottom right) to switch pistol / shotgun, **MAP** =
+  automap, **✕** = back to the clock. Doors open when you walk up to them; the
+  orange key opens the key door; reach the **EXIT** switch to finish a level.
+  Your game is kept when you leave the page. A new block shows a small banner
+  instead of interrupting the game.
 - **Header life-line:** the thin orange line under the header fills toward
   ~10 minutes since the last block (its real timestamp) and turns red when the
   next block is late.

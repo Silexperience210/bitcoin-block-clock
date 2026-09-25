@@ -6,7 +6,9 @@ Projet complet, signé **silexperience** :
   on-chain, cube, pools war, lightning, nœud, IA locale, signaux, BTC DOOM),
   architecture FreeRTOS, alertes sonores, portail WiFi. **V5 : tout l'écran est
   animé** — cinématique « nouveau bloc », transitions glissées, frise de blocs
-  façon mempool.space, graphe qui se dessine, réseau Lightning vivant… avec un
+  façon mempool.space, graphe qui se dessine, réseau Lightning vivant, et
+  **BTC DOOM v3** (vrai Doom-like plein écran : textures, portes, clés,
+  3 niveaux, 4 monstres originaux, fusil à pompe, automap, melt)… avec un
   réglage **MAX / ECO / OFF** sur la page web (ECO automatique la nuit).
   Documentation de développement : [`firmware/PROJET-NOTES.md`](firmware/PROJET-NOTES.md).
 - **Simulateur** (`firmware/tools/sim/`) : compile le vrai code de dessin pour

@@ -25,7 +25,8 @@ cd firmware/tools/sim
 ./build/sim out/tour tour         # séquence : prix -> swipe -> on-chain -> nouveau bloc
 ./make_media.sh                   # PNG + demo.mp4 + new-block.gif dans out/
 ```
-Modes : `pages`, `tour`, `pagesanim`, `cube`, `doom`, `boot`, `eco`, `off`.
+Modes : `pages`, `tour`, `pagesanim`, `cube`, `doom` (partie scriptée), `doomzoo`
+(galerie des monstres), `boot`, `eco`, `off`.
 Données d'exemple : `mockdata.inc` ; scénarios : `scenario.inc`.
 Variables : `SKETCH=` (dossier du sketch), `ARDUINO_LIBS=` (dossier des libs).
 

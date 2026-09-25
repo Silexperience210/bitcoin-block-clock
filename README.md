@@ -45,6 +45,9 @@ simulator ([`firmware/tools/sim`](firmware/tools/sim)).*
   count-up · **Lightning** live network with routed payments · **F&G** spring
   needle · node **radar ping** · **DOOM** brick walls, sky/fog gradients.
 - **Animated boot splash** while WiFi connects.
+- **BTC DOOM v3** — rebuilt from scratch as a real Doom-like (see below).
+
+![BTC DOOM v3](images/btc-doom-v3.gif)
 - **Animation level** on the web page (`http://blockclock.local`):
   **MAX** (everything alive, ~25 FPS) · **ECO** (transitions + events only) ·
   **OFF**. MAX falls back to ECO at night (23:00–07:00) for battery/heat.
@@ -92,7 +95,7 @@ watchdog, NTP. **Zero credentials in the code.**
 | 📡 **NODE** | Fear & Greed gauge + your Umbrel node status |
 | 🧠 **LOCAL AI** | 100 % on-device: next-block Poisson model + P(1/5/10 min), fee trend regression, weekly fee cycles learned live (NVS) |
 | 📊 **SIGNALS** | 1D vs 1W trend divergence, Bollinger squeeze, technical score, z-score anomaly alarms |
-| 👾 **BTC DOOM** | Wolfenstein-style raycaster with **dual multi-touch joysticks** (move + strafe / look). Hunt **Saylor** (tank, laser eyes), **Trump** (fast, blond), **Lagarde** (shoots rate hikes), dodge her projectiles, read the wall slogans — HODL, STACK SATS, FIX THE MONEY. Kill popups, voice taunts, waves. |
+| 👾 **BTC DOOM v3** | A real Doom-like, full screen: **textured walls, floors & ceilings**, panoramic sky, light zones + distance fading via colormaps (Doom's technique), pain/pickup palettes, **sliding doors, key door, exit switch, toxic sludge**, 4 original monsters (fiat zombie, inflation demon, shitcoin slime, the **money-printer boss** — *BRRR*), pistol + **Lightning shotgun**, chain-reacting barrels, 3 levels + tally screen, automap, Doom-style status bar with a reactive ₿ face, **screen melt**. Dual multi-touch sticks + FIRE. All assets are procedurally generated at first launch — no WAD, no id Software asset. |
 
 ### 📸 Screens (V5) — real renders of the firmware drawing code
 
@@ -105,11 +108,11 @@ watchdog, NTP. **Zero credentials in the code.**
 | ![LOCAL AI](images/screens-v5/page6_ia.png) | ![SIGNALS](images/screens-v5/page7_signaux.png) | ![BTC DOOM](images/screens-v5/page8_doom.png) |
 | **LOCAL AI** | **SIGNALS** | **BTC DOOM** |
 
-New block cinematic and slide transition:
+New block cinematic, slide transition and the BTC DOOM v3 bestiary:
 
-| | |
-|---|---|
-| ![NEW BLOCK](images/screens-v5/page_newblock.png) | ![TRANSITION](images/screens-v5/transition.png) |
+| | | |
+|---|---|---|
+| ![NEW BLOCK](images/screens-v5/page_newblock.png) | ![TRANSITION](images/screens-v5/transition.png) | ![DOOM](images/screens-v5/doom_monsters.png) |
 
 *Rendered by the desktop simulator [`firmware/tools/sim`](firmware/tools/sim):
 the sketch is compiled for Linux with the real Arduino_GFX library and a

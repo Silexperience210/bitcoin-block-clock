@@ -108,6 +108,42 @@ Horloge Bitcoin vitrine sur carte Guition JC3248W535 (ESP32-S3 N16R8 + écran 3.
 - `make_media.sh` : PNG + `demo.mp4` + `new-block.gif` (ffmpeg).
 - À relancer avec `--asan` après toute modif du rendu.
 
+### BTC DOOM v3 (`doom.h` + `doom_assets.h`) — remplace le mini-raycaster V4
+- **Plein écran** (`renderPage` court-circuite header/onglets) : vue 3D
+  480×280 + barre de statut 40 px façon Doom. Entrée/sortie de page et
+  changements de niveau avec **melt** (`fxMeltRun` : 2 `memcpy` par colonne).
+- **Rendu direct framebuffer** : 240 rayons DDA (1 pour 2 colonnes, la 2e est
+  un `memcpy`), murs texturés 64×64, **sols/plafonds par floor casting
+  vertical** (`dRowDist[y]` précalculé), ciel panoramique 256×150 (skyline),
+  **éclairage** = lumière de zone − distance×0,45 (+ muzzle flash) → index de
+  **colormap** 16 niveaux × 256 couleurs, 4 palettes (normale, douleur ×2, bonus).
+- **Portes** coulissantes (plan médian de la case, ouverture auto à l'approche,
+  refermeture 4 s), porte à clé orange, interrupteur EXIT (niveau 3 : boss
+  obligatoire), boue toxique (5 PV/s), lampes (lumière pleine).
+- **Monstres originaux** (aucune personne réelle) : zombie fiat (hitscan),
+  démon inflation (boules de feu + griffes), slime shitcoin (morsure, rapide),
+  boss **planche à billets** (gerbe de 3 billets, écrasement). Réveil à la vue
+  (LOS échantillonnée, rafraîchie 4-5×/s) ou au bruit d'un tir, poursuite
+  avec glissement le long des murs + contournement, ouverture des portes,
+  douleur probabiliste, mort en 3 images, cadavres persistants.
+- **Armes** : pistolet (sats) et fusil à pompe Lightning (7 plombs,
+  dispersion), tonneaux explosifs (souffle 2,3 cases, réaction en chaîne).
+  Armure = absorbe 1/3 des dégâts.
+- **Assets 100 % procéduraux** générés au 1er lancement dans la PSRAM
+  (~270 Ko) : palette 16 rampes × 16 nuances, 19 textures, ciel, 48 sprites
+  48×48 (7 poses × 4 monstres + objets + effets), 5 images d'arme ; contour
+  sombre automatique. Police 5×7 extraite de glcdfont (BSD) pour les affiches.
+- **Son** : `synthNoise()` (bruit blanc filtré) pour tirs/explosions (note
+  `freq = 0` dans la file audio, passée de 8 à 12 entrées).
+- **Contrôles** : `readTouchMulti` 3 doigts, sticks à base flottante (moitié
+  gauche = déplacement, droite = rotation), FIRE, MAP, ARMES (front montant).
+  Le loop ne gère plus que le ✕ sur cette page (ni onglets ni swipe).
+- Partie conservée quand on quitte la page ; `doomReset = true` = nouvelle partie.
+- Simulateur : modes `doom` (partie scriptée : porte, zombie, fusil, démon,
+  automap, tonneau, bilan, niveau 3, mort) et `doomzoo` (galerie).
+- ⚠️ À mesurer sur la carte : FPS (≈ 67 000 échantillons sol/plafond/mur par
+  image en PSRAM). Si c'est trop lent : `#define DV_COLS 160` dans doom.h (colonnes de 3 px, ~1/3 de calcul en moins).
+
 ### Budget V5
 - Compile : **40 % flash, 26 % RAM** (core 2.0.14, GFX 1.4.9, `--warnings all` : 0 warning).
 - PSRAM : framebuffer 300 Ko + 2 × 300 Ko (transitions).

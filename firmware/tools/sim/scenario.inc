@@ -26,6 +26,7 @@ void swipe(int x0, int x1, int y) {             // geste réel via le pilote tac
   for (int k = 0; k <= 6; k++) { harness_touch(1, x0 + (x1 - x0) * k / 6, y); loop(); g_ms += 20; }
   harness_touch(0); loop();
 }
+float dist2(float x, float y) { return (x - dPX) * (x - dPX) + (y - dPY) * (y - dPY); }
 void tap(int x, int y) { harness_touch(1, x, y); loop(); g_ms += 60; loop(); harness_touch(0); loop(); }
 void run_scenario(int argc, char **argv) {
   const char *out = argc > 1 ? argv[1] : "out";
@@ -80,13 +81,81 @@ void run_scenario(int argc, char **argv) {
     tap(TAB_W / 2, 310); newBlock("ViaBTC", 5.0f, 2011); runMs(NB_DUR + 600);
     rec(nullptr);
     animLevel = 2;
+  } else if (!strcmp(mode, "doomzoo")) {             // galerie : monstres / objets en pleine lumière
+    page = PG_DOOM; runFrames(2);
+    dLoadLevel(0); dNT = 0;
+    dAddThing(11.0f, 7.6f, K_ZOMBIE); dAddThing(11.2f, 8.8f, K_IMP); dAddThing(11.0f, 10.2f, K_SLIME);
+    dAddThing(9.2f, 7.5f, K_MED); dAddThing(9.2f, 8.3f, K_SATS); dAddThing(9.2f, 9.1f, K_SHELLS); dAddThing(9.2f, 9.9f, K_ARMOR); dAddThing(9.2f, 10.7f, K_KEY);
+    dAddThing(13.5f, 7.6f, K_BARREL); dAddThing(13.5f, 10.4f, K_RIG);
+    dPX = 7.4f; dPY = 9.1f; dPA = 0; dState = DS_PLAY;
+    for (int i = 0; i < dNT; i++) dTh[i].st = ST_IDLE;
+    { unsigned long t = millis(); for (int i = 0; i < dNT; i++) dTh[i].losMs = t + 100000; }
+    runFrames(3); harness_save((std::string(out) + "_1.ppm").c_str());
+    dTh[0].st = ST_ATK; dTh[0].stMs = millis(); dTh[1].st = ST_ATK; dTh[1].stMs = millis(); dTh[2].st = ST_ATK; dTh[2].stMs = millis();
+    dHasSG = true; dWeapon = 1; dShells = 20; dShotMs = millis();
+    loop(); harness_save((std::string(out) + "_2.ppm").c_str());
+    dLoadLevel(2); dPX = 10.0f; dPY = 12.5f; dPA = 0; dWeapon = 0; runFrames(2);
+    harness_save((std::string(out) + "_3.ppm").c_str());
+    dLoadLevel(1); dPX = 8.0f; dPY = 2.5f; dPA = 0; runFrames(2);
+    harness_save((std::string(out) + "_4.ppm").c_str());
   } else if (!strcmp(mode, "doom")) {
-    page = PG_DOOM; doomReset = true; rec(out);
+    page = PG_PRICE; needRedraw = true; runFrames(8);
+    rec(out);
+    runFrames(4);
+    tap(8 * TAB_W + TAB_W / 2, 310);                       // onglet DOOM -> melt
+    runFrames(22);
+    // avance (stick gauche)
+    harness_touch(1, 80, 214); loop();
+    for (int k = 0; k < 16; k++) { harness_touch(1, 80, 172); loop(); }
+    harness_touch(0); runFrames(3);
+    // porte de la salle des mineurs + zombie
+    dPX = 4.5f; dPY = 3.5f; dPA = 0.0f;
+    harness_touch(1, 80, 214); loop();
+    for (int k = 0; k < 10; k++) { harness_touch(1, 80, 190); loop(); }
+    for (int k = 0; k < 34; k++) { harness_touch(1, D_FIRE_X, D_FIRE_Y); loop(); }
+    harness_touch(0); runFrames(8);
+    // fusil à pompe + démon inflation
+    dPX = 11.5f; dPY = 5.2f; dPA = PI / 2;
+    for (int k = 0; k < 16; k++) loop();
+    dPX = 9.5f; dPY = 7.4f; dPA = PI / 2;
+    harness_touch(1, 80, 214); loop();
+    for (int k = 0; k < 8; k++) { harness_touch(1, 80, 180); loop(); }
+    harness_touch(0); runFrames(6);
+    runFrames(14);
+    { // vise le démon (1er monstre vivant de type IMP)
+      for (int i = 0; i < dNT; i++) if (dTh[i].kind == K_IMP && dTh[i].st < ST_DYING) { dPA = atan2f(dTh[i].y - dPY, dTh[i].x - dPX); break; }
+    }
+    for (int k = 0; k < 40; k++) {
+      for (int i = 0; i < dNT; i++) if (dTh[i].kind == K_IMP && dTh[i].st < ST_DYING && dist2(dTh[i].x, dTh[i].y) < 30) { dPA = atan2f(dTh[i].y - dPY, dTh[i].x - dPX); break; }
+      harness_touch(1, D_FIRE_X, D_FIRE_Y); loop();
+    }
+    harness_touch(0); runFrames(10);
+    // automap
+    tap(20, 15); runFrames(16); tap(20, 15); runFrames(4);
+    // tonneau explosif
+    dPX = 1.6f; dPY = 3.5f; dPA = 0.0f; dWeapon = 0;
+    runFrames(6);
+    for (int k = 0; k < 14; k++) { harness_touch(1, D_FIRE_X, D_FIRE_Y); loop(); }
+    harness_touch(0); runFrames(14);
+    // sortie -> bilan -> melt vers le niveau 2
+    dHasKey = true; dPX = 21.4f; dPY = 16.5f; dPA = 0.0f;
+    harness_touch(1, 80, 214); loop();
+    for (int k = 0; k < 10; k++) { harness_touch(1, 80, 180); loop(); }
+    harness_touch(0);
+    runMs(3000);
+    tap(240, 150); runFrames(25);
+    // niveau 3 : le boss
+    dLoadLevel(2); dHasSG = true; dShells = 40; dWeapon = 1; dHealth = 100; dArmor = 100;
+    dPX = 9.5f; dPY = 12.5f; dPA = 0.0f;
     runFrames(10);
-    for (int k = 0; k < 40; k++) { harness_touch(2, 70, 230 - k / 2, 300 + k, 250); loop(); }
-    for (int k = 0; k < 30; k++) { harness_touch(2, 70, 200, 330, 250); loop(); if (k % 6 == 0) { harness_touch(2, 70, 200, 412, 254); loop(); } }
-    harness_touch(0); runFrames(15);
+    for (int k = 0; k < 60; k++) {
+      for (int i = 0; i < dNT; i++) if (dTh[i].kind == K_BOSS) { dPA = atan2f(dTh[i].y - dPY, dTh[i].x - dPX); break; }
+      harness_touch(1, D_FIRE_X, D_FIRE_Y); loop();
+    }
+    harness_touch(0);
+    dHealth = 8; dArmor = 0; runFrames(60);
     rec(nullptr);
+    fprintf(stderr, "etat=%d vie=%d kills=%d/%d niveau=%d\n", dState, dHealth, dKills, dKillsTot, dLvl);
   }
   fprintf(stderr, "flushes=%d t=%lu\n", harness_flushes(), millis());
 }
