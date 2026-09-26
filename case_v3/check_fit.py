@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 # Contrôle d'intégration : volumes d'interférence composants / boîtier (doivent être ~0)
 import sys, os, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

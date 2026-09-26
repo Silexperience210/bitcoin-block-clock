@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 """
 Boitier BitcoinClock "deep" pour Guition JC3248W535 — version 2 pièces,
 profondeur ~15 cm pour haut-parleur + batterie 2000 mAh.

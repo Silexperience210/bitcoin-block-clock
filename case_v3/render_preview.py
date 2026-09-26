@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 # Rendu d'aperçu du boîtier V3 (rasteriseur numpy, sans OpenGL)
 import sys, os, math, numpy as np, trimesh
 from PIL import Image, ImageFilter

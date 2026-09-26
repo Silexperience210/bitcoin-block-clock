@@ -183,3 +183,8 @@ with **zero repair**.
 ---
 
 *BitcoinClock enclosure — designed by **silexperience**.*
+
+*Licensed under the **Apache License 2.0** (free to use, modify and sell, keep
+the attribution: “Bitcoin Block Clock — Copyright 2025-2026 silexperience”,
+<https://github.com/Silexperience210/bitcoin-block-clock>). Third-party
+material keeps its own terms — see `THIRD-PARTY.md`.*

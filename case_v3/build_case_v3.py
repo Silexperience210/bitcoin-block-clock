@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 """
 Bitcoin Block Clock — boîtier V3 « Flush »  (Guition JC3248W535, ESP32-S3 3,5")
 =================================================================================

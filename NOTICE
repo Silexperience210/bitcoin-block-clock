@@ -1,0 +1,18 @@
+Bitcoin Block Clock
+Copyright 2025-2026 silexperience
+https://github.com/Silexperience210/bitcoin-block-clock
+
+This product includes software and hardware designs developed by silexperience:
+ESP32-S3 firmware, parametric 3D-printed enclosure generators, documentation,
+web flasher and demo media. Those parts are licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+Third-party material is bundled in this repository as well. It is NOT covered
+by the Apache License 2.0 and keeps its own terms:
+
+  firmware/bitcoin-block-clock/src/sam/   S.A.M. speech synthesizer (abandonware)
+  firmware/bitcoin-block-clock/smooth_font.h   glyphs rasterized from Arial Bold
+  ref/case_orig/                          "Standalone Case JC3248W535C"
+                                          (c) so99hero, CC BY-NC-SA
+
+See THIRD-PARTY.md for the exact terms, attribution and caveats.

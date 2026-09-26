@@ -13,6 +13,7 @@
 ![Board](https://img.shields.io/badge/Board-Guition%20JC3248W535-blue?style=for-the-badge)
 ![Firmware](https://img.shields.io/badge/Firmware-Arduino-00979D?style=for-the-badge&logo=arduino&logoColor=white)
 ![Case](https://img.shields.io/badge/Case-3D%20Printed-success?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge&logo=apache)
 ![Pages](https://img.shields.io/badge/Pages-9-F7931A?style=for-the-badge)
 ![By](https://img.shields.io/badge/by-silexperience-F7931A?style=for-the-badge)
 
@@ -247,8 +248,38 @@ tilt angle, depth, USB cutout, speaker grille…
 - Board measurements from manufacturer photos via
   [GthiN89/JC3248W535EN](https://github.com/GthiN89/JC3248W535EN)
 - Board info: [atomic14 — Guition JC3248W535](https://www.atomic14.com/esp32/boards/guition-jc3248w535/)
-- Community case: [Thingiverse 7127557](https://www.thingiverse.com/thing:7127557)
+- Community case (design reference, **not** part of this project's licence):
+  [Thingiverse 7127557](https://www.thingiverse.com/thing:7127557) by **so99hero**,
+  **CC BY-NC-SA** — see [THIRD-PARTY.md](THIRD-PARTY.md)
 - APIs: CoinGecko · mempool.space · alternative.me (Fear & Greed)
+
+---
+
+## 📄 License
+
+**Apache License 2.0** — free to use, modify, print, sell and redistribute, as
+long as the copyright notice and the attribution are kept.
+
+```
+Bitcoin Block Clock — Copyright 2025-2026 silexperience
+Licensed under the Apache License, Version 2.0
+https://github.com/Silexperience210/bitcoin-block-clock
+```
+
+Want to reuse it? Keep the [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) files
+with your copy and credit **silexperience** with a link to the original
+repository — that is all the licence asks. In short: **use it, just say where
+it comes from.**
+
+The following material is **excluded** from this grant and keeps its own terms
+(details and exact wording in [`THIRD-PARTY.md`](THIRD-PARTY.md)):
+
+- `ref/case_orig/` — “Standalone Case JC3248W535C” by **so99hero**,
+  **CC BY-NC-SA** (reference only, **no commercial use**)
+- `firmware/bitcoin-block-clock/src/sam/` — S.A.M. speech synthesizer
+  (abandonware, **no licence**)
+- `firmware/bitcoin-block-clock/smooth_font.h` — digit glyphs rasterized from
+  the proprietary **Arial Bold**
 
 <div align="center">
 

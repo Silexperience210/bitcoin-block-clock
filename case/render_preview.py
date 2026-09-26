@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 import numpy as np
 import trimesh
 import matplotlib

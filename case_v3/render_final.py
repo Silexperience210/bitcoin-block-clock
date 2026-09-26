@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 silexperience — https://github.com/Silexperience210/bitcoin-block-clock
 import sys, os, math, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_case_v3 as C, render_preview as RP

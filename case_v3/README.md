@@ -66,3 +66,19 @@ Toutes les cotes sont en tête de `build_case_v3.py` :
 - **Haut-parleur :** `SPK_*`.
 
 Il faut `numpy`, `manifold3d`, `trimesh` et `matplotlib`. `check_fit.py` recalcule les interférences après chaque modification (elles doivent rester à ~0 mm³).
+
+## Licence
+
+**Apache 2.0** — utilisation, modification, impression et revente libres, à
+condition de conserver la mention de copyright et l'attribution :
+*Bitcoin Block Clock — Copyright 2025-2026 silexperience*, avec un lien vers le
+[dépôt d'origine](https://github.com/Silexperience210/bitcoin-block-clock).
+Voir [`../LICENSE`](../LICENSE) et [`../THIRD-PARTY.md`](../THIRD-PARTY.md).
+
+## Crédit
+
+Façade « squircle » et inclinaison à 12° : formes d'origine de **nos propres
+boîtiers v1/v2** ([`../case`](../case)). Le boîtier communautaire de
+[so99hero (Thingiverse 7127557)](https://www.thingiverse.com/thing:7127557),
+conservé en référence dans `../ref/case_orig/`, est sous **CC BY-NC-SA** : il
+n'est ni repris ni redistribué dans ce dossier.

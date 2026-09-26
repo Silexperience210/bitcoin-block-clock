@@ -161,3 +161,40 @@ Paramètres en tête des scripts : dimensions carte, entraxe des vis
 Sources des mesures : photos fabricant (via
 [github.com/GthiN89/JC3248W535EN](https://github.com/GthiN89/JC3248W535EN)) —
 carte 94,5 × 62 mm, zone active 73,4 × 49 mm.
+
+---
+
+## Licence
+
+**Apache 2.0** — utilisation libre : modifier, imprimer, vendre, redistribuer,
+à condition de conserver la mention de copyright et l'attribution.
+
+```
+Bitcoin Block Clock — Copyright 2025-2026 silexperience
+Sous licence Apache License 2.0
+https://github.com/Silexperience210/bitcoin-block-clock
+```
+
+En clair : **sers-toi du projet, cite l'origine.** Garde les fichiers
+[`LICENSE`](LICENSE) et [`NOTICE`](NOTICE) avec ta copie, et crédite
+**silexperience** avec un lien vers le dépôt d'origine — c'est tout ce que la
+licence demande.
+
+**Hors périmètre** (termes propres, détail dans [`THIRD-PARTY.md`](THIRD-PARTY.md)) :
+
+- `ref/case_orig/` — « Standalone Case JC3248W535C » de **so99hero**,
+  **CC BY-NC-SA** (référence de conception uniquement, **usage commercial
+  interdit** ; nos boîtiers `case/` et `case_v3/` sont des conceptions
+  indépendantes, régies par Apache 2.0)
+- `firmware/bitcoin-block-clock/src/sam/` — synthétiseur vocal S.A.M.
+  (abandonware, **aucune licence**)
+- `firmware/bitcoin-block-clock/smooth_font.h` — glyphes de chiffres
+  pixellisés depuis **Arial Bold** (police propriétaire)
+
+## Crédits
+
+- Mesures de la carte : [GthiN89/JC3248W535EN](https://github.com/GthiN89/JC3248W535EN)
+- Infos carte : [atomic14 — Guition JC3248W535](https://www.atomic14.com/esp32/boards/guition-jc3248w535/)
+- Boîtier communautaire (référence, licence séparée) :
+  [Thingiverse 7127557](https://www.thingiverse.com/thing:7127557) par **so99hero**
+- APIs : CoinGecko · mempool.space · alternative.me (Fear & Greed)
