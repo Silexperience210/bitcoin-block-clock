@@ -50,6 +50,14 @@ p.lead strong{color:var(--ink);font-weight:500}
   font:500 11px/1 "IBM Plex Mono",monospace;letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
 .player .bar .len{color:var(--btc)}
 
+/* ---------- video language switch ---------- */
+.lang{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+.lang button{cursor:pointer;background:transparent;color:var(--dim);border:0;padding:6px 13px;
+  font:500 10px/1 "IBM Plex Mono",monospace;letter-spacing:.16em;
+  transition:background .15s ease,color .15s ease}
+.lang button:hover{color:var(--ink)}
+.lang button.on{background:var(--btc);color:#0B0B0F}
+
 /* ---------- chapters ---------- */
 .chapters{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
 .chapters button{cursor:pointer;background:var(--panel2);color:var(--dim);
@@ -105,7 +113,7 @@ footer a:hover{color:var(--btc)}
 
 <div class="statusbar">
   <span><span class="dot"></span>V5.2 WALKTHROUGH</span>
-  <span><b>1:02</b> · every page, in motion</span>
+  <span id="sbMid"><b>1:02</b> · every page, in motion</span>
   <span><a href="index.html">← Web flasher</a></span>
 </div>
 
@@ -123,8 +131,12 @@ footer a:hover{color:var(--btc)}
       Your browser cannot play this video — <a href="media/bbl-demo-v5.2.mp4">download it here</a>.
     </video>
     <div class="bar">
-      <span>Bitcoin Block Clock · V5.2</span>
-      <span><span class="len">6.5 MB</span> · 1280×720 · with sound</span>
+      <span id="infoLeft">Bitcoin Block Clock · V5.2</span>
+      <span class="lang" id="lang" role="group" aria-label="Video language / langue de la vidéo">
+        <button type="button" data-lang="en" class="on">EN</button>
+        <button type="button" data-lang="fr">FR</button>
+      </span>
+      <span id="infoRight"><span class="len">6.5 MB</span> · 1280×720 · with sound</span>
     </div>
   </div>
 
@@ -177,23 +189,95 @@ footer a:hover{color:var(--btc)}
 
 <script>
   var v = document.getElementById('v');
-  var buttons = [].slice.call(document.querySelectorAll('#ch button'));
+  var chBox = document.getElementById('ch');
+  var langBox = document.getElementById('lang');
+  var infoLeft = document.getElementById('infoLeft');
+  var infoRight = document.getElementById('infoRight');
+  var sbMid = document.getElementById('sbMid');
+  var buttons = [];
+
+  // Two cuts of the same walkthrough. The English one is the V5.2 montage the page was built around;
+  // the French one is the longer cut (ten chapters) with its own poster and its own chapter marks.
+  var LANGS = {
+    en: {
+      src: 'media/bbl-demo-v5.2.mp4', poster: 'media/bbl-demo-poster.jpg',
+      left: 'Bitcoin Block Clock · V5.2',
+      right: '<span class="len">6.5 MB</span> · 1280×720 · with sound',
+      status: '<b>1:02</b> · every page, in motion',
+      chapters: [[0,'Intro'], [20,'Block strip — live mempool'], [30,'06 · Pools war'],
+                 [40,'08 · Signals — honest numbers'], [61,'End card']]
+    },
+    fr: {
+      src: 'media/bbl-demo-fr.mp4', poster: 'media/bbl-demo-fr-poster.jpg',
+      left: 'Bitcoin Block Clock · version française',
+      right: '<span class="len">9.8 MB</span> · 1920×1080 · avec son',
+      status: '<b>1:33</b> · toutes les pages, en mouvement',
+      chapters: [[5,'01 · Démarrage'], [11,'02 · Prix'], [23,'03 · Navigation'], [27,'04 · On-chain'],
+                 [35,'05 · Nouveau bloc'], [41,'06 · Toutes les pages'], [52,'07 · IA locale'],
+                 [57,'08 · Signaux'], [68,'09 · BTC DOOM'], [75,'10 · Réglages']]
+    }
+  };
+
+  function mmss(t){
+    var m = Math.floor(t / 60), s = Math.round(t % 60);
+    return m + ':' + (s < 10 ? '0' + s : s);
+  }
 
   function active(btn){
     buttons.forEach(function(b){ b.classList.remove('on'); });
     if (btn) btn.classList.add('on');
   }
 
-  buttons.forEach(function(btn){
-    btn.addEventListener('click', function(){
-      v.currentTime = parseFloat(btn.dataset.t) || 0;
-      v.play();
-      active(btn);
-      try { v.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) { v.scrollIntoView(); }
+  function drawChapters(list){
+    chBox.innerHTML = '';
+    buttons = list.map(function(c){
+      var b = document.createElement('button');
+      b.dataset.t = c[0];
+      b.innerHTML = '<i>' + mmss(c[0]) + '</i>' + c[1];
+      b.addEventListener('click', function(){
+        v.currentTime = c[0];
+        v.play();
+        active(b);
+        try { v.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) { v.scrollIntoView(); }
+      });
+      chBox.appendChild(b);
+      return b;
     });
+    v.__current = null;
+    active(buttons[0]);
+  }
+
+  function setLang(code, keepTime){
+    var L = LANGS[code] || LANGS.en;
+    var t = keepTime ? v.currentTime : 0;
+    var playing = keepTime && !v.paused;
+    v.pause();
+    v.setAttribute('poster', L.poster);
+    v.src = L.src;
+    v.lang = code;
+    v.load();
+    if (t > 0) {
+      v.addEventListener('loadedmetadata', function once(){
+        v.removeEventListener('loadedmetadata', once);
+        try { v.currentTime = t; } catch(e) {}
+        if (playing) v.play();
+      });
+    }
+    infoLeft.textContent = L.left;
+    infoRight.innerHTML = L.right;
+    sbMid.innerHTML = L.status;
+    drawChapters(L.chapters);
+    [].slice.call(langBox.children).forEach(function(b){
+      b.classList.toggle('on', b.dataset.lang === code);
+    });
+    try { localStorage.setItem('bbl-video-lang', code); } catch(e) {}
+  }
+
+  [].slice.call(langBox.children).forEach(function(btn){
+    btn.addEventListener('click', function(){ setLang(btn.dataset.lang, true); });
   });
 
-  // suit le chapitre en cours pendant la lecture
+  // follows the chapter being played
   v.addEventListener('timeupdate', function(){
     var t = v.currentTime, cur = null;
     buttons.forEach(function(b){
@@ -201,6 +285,12 @@ footer a:hover{color:var(--btc)}
     });
     if (cur && cur !== v.__current) { v.__current = cur; active(cur); }
   });
+
+  // English is the default; a visitor who has picked French gets French back.
+  var saved = null;
+  try { saved = localStorage.getItem('bbl-video-lang'); } catch(e) {}
+  if (saved === 'fr') setLang('fr', false);
+  else drawChapters(LANGS.en.chapters);
 </script>
 
 </body>
