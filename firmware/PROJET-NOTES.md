@@ -29,7 +29,7 @@ Horloge Bitcoin vitrine sur carte Guition JC3248W535 (ESP32-S3 N16R8 + écran 3.
 1. **Panel ignore les fenêtres d'adressage partielles** → OBLIGATOIRE : `Arduino_Canvas` (framebuffer PSRAM 320×480×2 = 307 Ko) + `flush()` full-frame. L'écriture directe = pixels épars. *(leçon du driver communautaire me-processware : "REQUIRED for QSPI!")*
 2. **Inversion couleurs** : `ips=false` au constructeur (sinon écran blanc inversé)
 3. **Rotation** : panel natif portrait 320×480 ; paysage 480×320 via **rotation canvas=1** (software, fiable — rotation hardware MADCTL capricieuse sur ce chip)
-4. **Mapping tactile paysage** : `x_log = ry_raw ; y_log = 319 - rx_raw` (protocole : écrire `{0xB5,0xAB,0xA5,0x5A,0,0,0,0x08}` puis lire 8 bytes ; data[0]≠0 ou data[1]==0 → pas de touch ; x=(d2&0xF)<<8|d3, y=(d4&0xF)<<8|d5)
+4. **Mapping tactile paysage** : `touchMap()` = calibration des bruts (`TP_RAW_*` : rx 12..310 → 0..319, ry 14..461 → 0..479) **puis** `x_log = ry ; y_log = 319 - rx` (protocole : écrire `{0xB5,0xAB,0xA5,0x5A,0,0,0,0x08}` puis lire 8 bytes ; data[0]≠0, data[1]==0 ou data[1]>5 → pas de touch — **au repos data[1] = 0x70 (112)** ; rx=ry=273 = sentinelle invalide ; x=(d2&0xF)<<8|d3, y=(d4&0xF)<<8|d5). Vérif sans carte : `build/sim out touchcheck`
 5. **Librairie écran** : `GFX Library for Arduino` **v1.4.9 EXACTE** (la 1.6.x exige core ≥2.0.17 via esp32-hal-periman.h ; core figé à 2.0.14 pour les autres projets ESP32-CAM)
 6. **Audio sans lib** : dong synthétisé I2S legacy (driver/i2s.h du core 2.0.14) — sinusoïde + partiel 2.76×, enveloppe exp, 22050 Hz stéréo
 7. **Après flash : reset physique obligatoire** (la carte reste en DOWNLOAD boot si un programme tient le port COM — ouvrir COM42 avec DTR actif = boot download)

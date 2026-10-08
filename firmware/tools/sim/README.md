@@ -27,6 +27,9 @@ cd firmware/tools/sim
 ```
 Modes : `pages`, `tour`, `pagesanim`, `cube`, `doom` (partie scriptée), `doomzoo`
 (galerie des monstres), `boot`, `eco`, `off`,
+`touchcheck` (tactile : trame de repos `0x70`, sentinelle 273, coins et
+balayage pixel par pixel des boutons DOOM via le vrai `readTouch*` / `dReadInput` / `loop` ;
+le doigt suit le modèle de dalle `SIM_R*` de `harness_main.cpp`),
 `sigcheck` (parité du calcul embarqué des signaux : `build/sim out.txt sigcheck daily.txt`,
 fichier `h l c` par ligne, à comparer avec `calibrate_squeeze.compute_states`).
 Données d'exemple : `mockdata.inc` ; scénarios : `scenario.inc`.

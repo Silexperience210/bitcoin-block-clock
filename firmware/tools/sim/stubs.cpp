@@ -49,16 +49,19 @@ BaseType_t xQueueReceive(QueueHandle_t h, void *it, TickType_t) { Q *q = (Q*)h; 
 BaseType_t xTaskCreatePinnedToCore(void (*)(void*), const char *, uint32_t, void *, int, TaskHandle_t *, int) { return 1; }
 void vTaskDelay(TickType_t t) { g_ms += t; }
 unsigned uxTaskGetStackHighWaterMark(TaskHandle_t) { return 4096; }
-// ---- tactile simulé : protocole AXS15231B (8 octets/doigt pour 1 doigt) ----
-int g_nTouch = 0; int g_tx[2], g_ty[2];
+// ---- tactile simulé : protocole AXS15231B (6 octets/doigt, 2 doigts max) ----
+// g_rx/g_ry = coordonnées BRUTES natives (portrait) ; harness_touch() les
+// calcule depuis un point logique. g_rawLen > 0 : trame brute imposée telle
+// quelle (ex. état de repos 0x70), pour tester les portes de readTouch*.
+int g_nTouch = 0; int g_rx[2], g_ry[2];
+uint8_t g_raw[32]; int g_rawLen = 0;
 static uint8_t wbuf[32]; static int wlen = 0, wpos = 0;
 uint8_t TwoWire::requestFrom(uint8_t, uint8_t n) {
   memset(wbuf, 0, sizeof(wbuf)); wlen = n; wpos = 0;
+  if (g_rawLen > 0) { memcpy(wbuf, g_raw, g_rawLen); return n; }
   wbuf[0] = 0; wbuf[1] = (uint8_t)g_nTouch;
   for (int i = 0; i < g_nTouch && i < 2; i++) {
-    int o = i * 6;
-    // mapping inverse de readTouch : x = ry ; y = 319 - rx
-    int ry = g_tx[i], rx = 319 - g_ty[i];
+    int o = i * 6, rx = g_rx[i], ry = g_ry[i];
     wbuf[o + 2] = (rx >> 8) & 0x0F; wbuf[o + 3] = rx & 0xFF;
     wbuf[o + 4] = (ry >> 8) & 0x0F; wbuf[o + 5] = ry & 0xFF;
   }

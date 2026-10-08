@@ -4,7 +4,8 @@
 #include <vector>
 #include <string>
 extern unsigned long g_ms; extern time_t g_epoch; extern bool g_quietSerial;
-extern int g_nTouch; extern int g_tx[2], g_ty[2];
+extern int g_nTouch; extern int g_rx[2], g_ry[2];
+extern uint8_t g_raw[32]; extern int g_rawLen;
 static std::vector<uint16_t> g_last(480 * 320);
 static int g_flushes = 0;
 bool g_rec = false; char g_recDir[256] = "."; int g_recN = 0;
@@ -32,7 +33,22 @@ void harness_save_to(const char *path) {
 }
 void harness_save(const char *path) { harness_save_to(path); }
 int harness_flushes() { return g_flushes; }
-void harness_touch(int n, int x0 = 0, int y0 = 0, int x1 = 0, int y1 = 0) { g_nTouch = n; g_tx[0] = x0; g_ty[0] = y0; g_tx[1] = x1; g_ty[1] = y1; }
+// modèle de la dalle réelle (bornes brutes mesurées sur JC3248W535, cf. TP_RAW_*
+// du sketch) : un doigt au point logique paysage (x, y) -> brut natif (rx, ry).
+// Indépendant des constantes du firmware : c'est la "physique" qu'il doit corriger.
+#define SIM_RX_MIN 12
+#define SIM_RX_MAX 310
+#define SIM_RY_MIN 14
+#define SIM_RY_MAX 461
+void harness_raw_of(int x, int y, int &rx, int &ry) {
+  int p = 319 - y, q = x;                          // natif portrait : colonne p, ligne q
+  rx = SIM_RX_MIN + (p * (SIM_RX_MAX - SIM_RX_MIN) + 159) / 319;
+  ry = SIM_RY_MIN + (q * (SIM_RY_MAX - SIM_RY_MIN) + 239) / 479;
+}
+void harness_touch(int n, int x0 = 0, int y0 = 0, int x1 = 0, int y1 = 0) {
+  g_rawLen = 0; g_nTouch = n;
+  harness_raw_of(x0, y0, g_rx[0], g_ry[0]); harness_raw_of(x1, y1, g_rx[1], g_ry[1]);
+}
 // le sketch prétraité (avec prototypes) est inclus ici
 #include "sketch_pre.cpp"
 // scénario (même unité de compilation : accès direct aux globals du sketch)

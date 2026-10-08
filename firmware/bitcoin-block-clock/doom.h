@@ -35,6 +35,9 @@
 #define GAME_EY 2
 #define GAME_EW 38
 #define GAME_EH 30
+// zone tactile du ✕ : rectangle dessiné étendu jusqu'aux bords de l'écran (un
+// appui dans le coin tombe en x = 479 / y = 0) — même test pour loop et dReadInput
+inline bool dExitHit(int x, int y) { return x >= GAME_EX && y <= GAME_EY + GAME_EH; }
 #define D_FIRE_X 414
 #define D_FIRE_Y 222
 #define D_FIRE_R 38
@@ -486,7 +489,7 @@ static void dReadInput() {
     if (ev[f] == 1) continue;                                         // doigt relevé
     int x = xs[f], y = ys[f];
     zones |= DZ_ANY;
-    if (x >= GAME_EX && y <= GAME_EY + GAME_EH) continue;             // ✕ : géré par le loop
+    if (dExitHit(x, y)) continue;                                     // ✕ : géré par le loop
     if (x < 52 && y < 34) { zones |= DZ_MAP; continue; }
     if (y >= DSB_Y) { if (x >= 384) zones |= DZ_ARMS; continue; }
     int fdx = x - D_FIRE_X, fdy = y - D_FIRE_Y;

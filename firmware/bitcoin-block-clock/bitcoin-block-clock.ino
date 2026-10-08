@@ -107,6 +107,19 @@ private:
 #define SCR_W 480
 #define SCR_H 320
 
+// Tactile AXS15231B : calibration des coordonnées BRUTES (natives portrait),
+// appliquée AVANT la rotation paysage. Le doigt ne couvre pas 0..319 / 0..479 :
+// plage utile relevée sur d'autres JC3248W535 : rx 12..310, ry 14..461 (à
+// confirmer sur chaque exemplaire : appui dans les 4 coins) -> remise
+// à l'échelle sur 0..PANEL_W-1 / 0..PANEL_H-1 (sans elle : jusqu'à 18 px d'écart
+// aux bords, là où sont MAP, ✕ et ARMES de BTC DOOM).
+#define TP_RAW_X_MIN   12
+#define TP_RAW_X_MAX   310
+#define TP_RAW_Y_MIN   14
+#define TP_RAW_Y_MAX   461
+#define TP_RAW_INVALID 273   // sentinelle du contrôleur : rx = ry = 273 -> point invalide
+#define TP_MAX_PTS     5     // doigts suivis ; au repos n_points = 0x70 (112) -> pas de contact
+
 // ---------------- PALETTE ----------------
 #define C_BG      0x0841
 #define C_PANEL   0x10A2
@@ -703,6 +716,20 @@ void playWhale()  { playNote(220, 500, 50, SND_EVENT); playNote(196, 700, 50, SN
 // =====================================================================
 //  TACTILE — AXS15231B (I2C 0x3B) + mapping paysage (rotation 1)
 // =====================================================================
+// brut natif -> paysage logique : calibration (TP_RAW_*) PUIS rotation 1
+// (swap + mirror X). Bornée avant rotation : pas de débordement uint16.
+bool touchMap(uint16_t rx, uint16_t ry, uint16_t &x, uint16_t &y) {
+  if (rx == TP_RAW_INVALID && ry == TP_RAW_INVALID) return false;
+  const int dx = TP_RAW_X_MAX - TP_RAW_X_MIN, dy = TP_RAW_Y_MAX - TP_RAW_Y_MIN;
+  int cx = constrain((int)rx, TP_RAW_X_MIN, TP_RAW_X_MAX) - TP_RAW_X_MIN;
+  int cy = constrain((int)ry, TP_RAW_Y_MIN, TP_RAW_Y_MAX) - TP_RAW_Y_MIN;
+  cx = (cx * (PANEL_W - 1) + dx / 2) / dx;         // 0..PANEL_W-1
+  cy = (cy * (PANEL_H - 1) + dy / 2) / dy;         // 0..PANEL_H-1
+  x = cy;
+  y = (PANEL_W - 1) - cx;
+  return true;
+}
+
 bool readTouch(uint16_t &x, uint16_t &y) {
   static const uint8_t cmd[8] = {0xB5, 0xAB, 0xA5, 0x5A, 0, 0, 0, 0x08};
   Wire.beginTransmission(TP_ADDR);
@@ -711,22 +738,17 @@ bool readTouch(uint16_t &x, uint16_t &y) {
   if (Wire.requestFrom((uint8_t)TP_ADDR, (uint8_t)8) != 8) return false;
   uint8_t d[8];
   for (int i = 0; i < 8; i++) d[i] = Wire.read();
-  if (d[0] != 0 || d[1] == 0) return false;
+  if (d[0] != 0 || d[1] == 0 || d[1] > TP_MAX_PTS) return false;   // repos : 0x70
   uint16_t rx = ((d[2] & 0x0F) << 8) | d[3];
   uint16_t ry = ((d[4] & 0x0F) << 8) | d[5];
-  // mapping portrait natif -> paysage rotation 1 (swap + mirror X)
-  x = ry;
-  y = (PANEL_W - 1) - rx;
-  if (x >= SCR_W) x = SCR_W - 1;
-  if (y >= SCR_H) y = SCR_H - 1;
-  return true;
+  return touchMap(rx, ry, x, y);
 }
 
 // lecture multi-touch AXS15231B : 6 octets par doigt (jusqu'à 5).
 // ev : 1 = relevé, sinon pression. Retourne le nombre de doigts.
 int readTouchMulti(uint16_t *xs, uint16_t *ys, uint8_t *ev, int maxPts) {
   static const uint8_t cmd[8] = {0xB5, 0xAB, 0xA5, 0x5A, 0, 0, 0, 0x08};
-  if (maxPts > 5) maxPts = 5;                      // d[30] = 5 doigts max
+  if (maxPts > TP_MAX_PTS) maxPts = TP_MAX_PTS;    // d[30] = 5 doigts max
   Wire.beginTransmission(TP_ADDR);
   Wire.write(cmd, 8);
   if (Wire.endTransmission(false) != 0) return 0;
@@ -734,15 +756,14 @@ int readTouchMulti(uint16_t *xs, uint16_t *ys, uint8_t *ev, int maxPts) {
   if (Wire.requestFrom((uint8_t)TP_ADDR, (uint8_t)want) != want) return 0;
   uint8_t d[30];
   for (int i = 0; i < want; i++) d[i] = Wire.read();
-  if (d[1] == 0) return 0;
+  if (d[1] == 0 || d[1] > TP_MAX_PTS) return 0;   // repos : n_points = 0x70
   int n = min((int)d[1], maxPts), cnt = 0;
   for (int i = 0; i < n; i++) {
     int o = i * 6;
     uint16_t rx = ((d[o + 2] & 0x0F) << 8) | d[o + 3];
     uint16_t ry = ((d[o + 4] & 0x0F) << 8) | d[o + 5];
-    uint16_t x = ry, y = (PANEL_W - 1) - rx;
-    if (x >= SCR_W) x = SCR_W - 1;
-    if (y >= SCR_H) y = SCR_H - 1;
+    uint16_t x, y;
+    if (!touchMap(rx, ry, x, y)) continue;         // sentinelle 273 : doigt ignoré
     xs[cnt] = x; ys[cnt] = y; ev[cnt] = (d[o + 2] >> 6) & 0x03;
     cnt++;
   }
@@ -3331,7 +3352,7 @@ void loop() {
       if (page == PG_DOOM) {
         // DOOM plein écran : seul le ✕ compte (les autres touches sont gérées
         // par le jeu : sticks, FIRE, MAP, armes) — pas d'onglets ni de swipe
-        if (downX >= GAME_EX && downX <= GAME_EX + GAME_EW && downY >= GAME_EY && downY <= GAME_EY + GAME_EH) {
+        if (dExitHit(downX, downY)) {
           beep(900, 60, 30); gotoPage(PG_PRICE, -1); lastActionMs = millis();
         }
       }

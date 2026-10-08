@@ -28,6 +28,97 @@ void swipe(int x0, int x1, int y) {             // geste réel via le pilote tac
 }
 float dist2(float x, float y) { return (x - dPX) * (x - dPX) + (y - dPY) * (y - dPY); }
 void tap(int x, int y) { harness_touch(1, x, y); loop(); g_ms += 60; loop(); harness_touch(0); loop(); }
+// ---- touchcheck : vérifie readTouch / readTouchMulti / dReadInput / ✕ du loop ----
+// zone décidée par dReadInput pour l'état tactile courant (1 frame, sans historique)
+const char *dZoneNow() {
+  dZonesPrev = 0; dJL.on = dJR.on = false;
+  dReadInput();
+  if (dTaps & DZ_MAP) return "MAP";
+  if (dTaps & DZ_ARMS) return "ARMES";
+  if (dFireHeld) return "FIRE";
+  if (dJL.on) return "STICK_G";
+  if (dJR.on) return "STICK_D";
+  if (dTaps & DZ_ANY) return "CROIX";             // contact consommé sans action : ✕ (loop)
+  return "AUCUN";
+}
+// tap réel sur la page DOOM : le loop() quitte-t-il vers PG_PRICE ?
+bool doomExitTap(int x, int y) {
+  page = PG_DOOM; needRedraw = true; g_ms += 400;   // hors anti-rebond (250 ms)
+  tap(x, y);
+  bool out = page != PG_DOOM;
+  page = PG_DOOM; g_ms += 400;
+  return out;
+}
+void rawFrame(const uint8_t *b, int n) { memset(g_raw, 0, sizeof(g_raw)); memcpy(g_raw, b, n); g_rawLen = 32; }
+void touchCheck() {
+  page = PG_DOOM; doomReset = true; needRedraw = true; runFrames(3);
+  uint16_t x, y, xs[3], ys[3]; uint8_t ev[3];
+  // 1. état de repos AXS15231B : toute la trame à 0x70 (n_points = 112)
+  { uint8_t b[32]; memset(b, 0x70, sizeof(b)); rawFrame(b, 32); }
+  bool t1 = readTouch(x, y);
+  printf("REPOS 0x70 : readTouch=%d", t1); if (t1) printf(" (%u,%u)", x, y);
+  int n = readTouchMulti(xs, ys, ev, 3);
+  printf(" | readTouchMulti=%d", n);
+  for (int i = 0; i < n; i++) printf(" [%u,%u ev=%u]", xs[i], ys[i], ev[i]);
+  printf(" | dReadInput -> %s\n", dZoneNow());
+  // 2. sentinelle d'invalidité rx = ry = 273, présentée comme un appui (ev = 0)
+  { uint8_t b[8] = {0, 1, 273 >> 8, 273 & 0xFF, 273 >> 8, 273 & 0xFF, 0, 0}; rawFrame(b, 8); }
+  t1 = readTouch(x, y);
+  printf("SENTINELLE 273 : readTouch=%d", t1); if (t1) printf(" (%u,%u)", x, y);
+  n = readTouchMulti(xs, ys, ev, 3);
+  printf(" | readTouchMulti=%d | dReadInput -> %s\n", n, dZoneNow());
+  // 3. coins + centre : doigt réel (modèle de dalle) -> coordonnées firmware
+  const int P[5][2] = {{0, 0}, {479, 0}, {0, 319}, {479, 319}, {240, 160}};
+  for (auto &p : P) {
+    harness_touch(1, p[0], p[1]);
+    readTouch(x, y);
+    printf("POINT reel(%3d,%3d) brut(rx=%3d,ry=%3d) -> firmware(%3u,%3u) erreur(%+d,%+d)\n",
+           p[0], p[1], g_rx[0], g_ry[0], x, y, (int)x - p[0], (int)y - p[1]);
+  }
+  // 4. boutons DOOM : centre + bords du rectangle dessiné
+  struct T { const char *nom; int x, y; const char *attendu; } C[] = {
+    {"MAP centre", 27, 17, "MAP"}, {"MAP bord droit", 48, 17, "MAP"}, {"MAP bord haut-g", 5, 4, "MAP"},
+    {"FIRE centre", D_FIRE_X, D_FIRE_Y, "FIRE"}, {"FIRE bord bas", D_FIRE_X, D_FIRE_Y + 36, "FIRE"},
+    {"ARMES '3'", 421, 293, "ARMES"}, {"ARMES haut", 400, 285, "ARMES"},
+    {"stick G", 80, 214, "STICK_G"}, {"stick D", 300, 214, "STICK_D"},
+    {"croix centre", 457, 16, "CROIX"}, {"croix bord g", 442, 16, "CROIX"}, {"croix coin", 479, 0, "CROIX"},
+  };
+  int ok = 0;
+  for (auto &c : C) {
+    harness_touch(1, c.x, c.y);
+    readTouch(x, y);
+    const char *z = dZoneNow();
+    bool good = !strcmp(z, c.attendu);
+    if (!strcmp(c.attendu, "CROIX")) good = good && doomExitTap(c.x, c.y);
+    ok += good;
+    printf("BOUTON %-16s reel(%3d,%3d) -> firmware(%3u,%3u) zone=%-7s attendu=%-7s %s\n",
+           c.nom, c.x, c.y, x, y, z, c.attendu, good ? "OK" : "ECHEC");
+  }
+  printf("BOUTONS : %d/%d OK\n", ok, (int)(sizeof(C) / sizeof(C[0])));
+  // 5. balayage pixel par pixel de chaque bouton DESSINÉ (pas 1 px ; ✕ : pas 2 px, tap réel)
+  struct R { const char *nom; int x0, y0, x1, y1, cx, cy, r; const char *attendu; } Z[] = {
+    {"MAP   fillRoundRect(4,3,46,28)", 4, 3, 49, 30, 0, 0, 0, "MAP"},
+    {"FIRE  cercle(414,222,r38)", D_FIRE_X - D_FIRE_R, D_FIRE_Y - D_FIRE_R, D_FIRE_X + D_FIRE_R, D_FIRE_Y + D_FIRE_R, D_FIRE_X, D_FIRE_Y, D_FIRE_R, "FIRE"},
+    {"ARMES cadres 2/3 (391..430,284..303)", 391, 284, 430, 303, 0, 0, 0, "ARMES"},
+    {"STICK_G cercle(80,214,r40)", 40, 174, 120, 254, 80, 214, 40, "STICK_G"},
+    {"STICK_D cercle(300,214,r40)", 260, 174, 340, 254, 300, 214, 40, "STICK_D"},
+    {"CROIX fillRoundRect(440,3,36,28)", 440, 3, 475, 30, 0, 0, 0, "CROIX"},
+  };
+  for (auto &r : Z) {
+    int tot = 0, hit = 0, step = !strcmp(r.attendu, "CROIX") ? 2 : 1;
+    for (int yy = r.y0; yy <= r.y1; yy += step)
+      for (int xx = r.x0; xx <= r.x1; xx += step) {
+        if (r.r && (xx - r.cx) * (xx - r.cx) + (yy - r.cy) * (yy - r.cy) > r.r * r.r) continue;
+        tot++;
+        harness_touch(1, xx, yy);
+        bool good = !strcmp(dZoneNow(), r.attendu);
+        if (good && !strcmp(r.attendu, "CROIX")) good = doomExitTap(xx, yy);
+        hit += good;
+      }
+    printf("BALAYAGE %-38s %4d/%4d = %5.1f %%\n", r.nom, hit, tot, 100.0 * hit / tot);
+  }
+  g_rawLen = 0; harness_touch(0);
+}
 void run_scenario(int argc, char **argv) {
   const char *out = argc > 1 ? argv[1] : "out";
   const char *mode = argc > 2 ? argv[2] : "pages";
@@ -178,6 +269,8 @@ void run_scenario(int argc, char **argv) {
     dHealth = 8; dArmor = 0; runFrames(60);
     rec(nullptr);
     fprintf(stderr, "etat=%d vie=%d kills=%d/%d niveau=%d\n", dState, dHealth, dKills, dKillsTot, dLvl);
+  } else if (!strcmp(mode, "touchcheck")) {         // mapping tactile : trames brutes -> zones DOOM
+    touchCheck();
   }
   fprintf(stderr, "flushes=%d t=%lu\n", harness_flushes(), millis());
 }
